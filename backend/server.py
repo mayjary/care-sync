@@ -19,7 +19,7 @@ def _require_env(name: str) -> str:
     return v
 client = AsyncIOMotorClient(_require_env("MONGO_URL"))
 db = client[_require_env("DB_NAME")]
-app = FastAPI(title="CareFlow API")
+app = FastAPI(title="CareSync API")
 api = APIRouter(prefix="/api")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 UPLOAD_DIR = ROOT_DIR / "private_uploads"
@@ -130,7 +130,7 @@ def roles(*allowed):
     return check
 
 @api.get("/")
-async def root(): return {"message": "CareFlow is ready"}
+async def root(): return {"message": "CareSync is ready"}
 @api.get("/health")
 async def health():
     await db.command("ping")
@@ -222,7 +222,7 @@ async def google_auth(session_id: str, response: Response):
     if not data.get("email"): raise HTTPException(401, "Google sign-in was not completed")
     user = await db.users.find_one({"email": data["email"].lower()})
     if not user:
-        user = {"user_id": "user_" + uuid.uuid4().hex[:12], "name": data.get("name", "CareFlow user"), "email": data["email"].lower(), "picture": data.get("picture"), "role": "patient", "created_at": now().isoformat()}; await db.users.insert_one(user)
+        user = {"user_id": "user_" + uuid.uuid4().hex[:12], "name": data.get("name", "CareSync user"), "email": data["email"].lower(), "picture": data.get("picture"), "role": "patient", "created_at": now().isoformat()}; await db.users.insert_one(user)
     response.set_cookie("session_token", token_for(user), httponly=True, secure=True, samesite="none", max_age=604800, path="/"); return public(user)
 
 @api.get("/doctors")
@@ -315,19 +315,23 @@ async def delete_exception(exception_id: str, user=Depends(roles("doctor", "admi
 async def slots(doctor_id: str, appointment_date: str):
     try: day = date.fromisoformat(appointment_date)
     except ValueError: raise HTTPException(400, "Invalid date")
+    today = now().date()
+    if day < today: return []
     if await db.availability_exceptions.find_one({"doctor_id": doctor_id, "start_date": {"$lte": appointment_date}, "end_date": {"$gte": appointment_date}}, {"_id": 0}): return []
     rules = await db.availability.find({"doctor_id": doctor_id, "weekday": day.weekday()}, {"_id": 0}).to_list(50)
     if not rules: return []
     def mins(v): h, m = map(int, v.split(":")); return h * 60 + m
+    now_mins = now().hour * 60 + now().minute if day == today else -1
     booked = await db.appointments.find({"doctor_id": doctor_id, "appointment_date": appointment_date, "status": {"$nin": ["cancelled", "needs_rescheduling"]}}, {"_id": 0, "appointment_time": 1}).to_list(200)
     taken = {x["appointment_time"] for x in booked}
     out = []; seen = set()
     for r in sorted(rules, key=lambda x: x["start_time"]):
         cur = mins(r["start_time"]); end = mins(r["end_time"]); dur = r.get("duration", 30)
         while cur + dur <= end:
-            label = f"{cur//60:02d}:{cur%60:02d}"
-            if label not in seen:
-                seen.add(label); out.append({"time": label, "available": label not in taken})
+            if cur > now_mins:
+                label = f"{cur//60:02d}:{cur%60:02d}"
+                if label not in seen:
+                    seen.add(label); out.append({"time": label, "available": label not in taken})
             cur += dur
     return sorted(out, key=lambda x: x["time"])
 
@@ -337,6 +341,11 @@ async def notify(user_id, title, message, kind="appointment"):
 async def book(body: AppointmentCreate, user=Depends(roles("patient"))):
     doctor = await db.users.find_one({"user_id": body.doctor_id, "role":"doctor"}, {"_id":0})
     if not doctor: raise HTTPException(404, "Doctor not found")
+    try:
+        appt_dt = datetime.fromisoformat(f"{body.appointment_date}T{body.appointment_time}:00").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, "Invalid appointment date or time")
+    if appt_dt <= now(): raise HTTPException(400, "Please pick a future date and time")
     available = await slots(body.doctor_id, body.appointment_date); chosen = next((x for x in available if x["time"] == body.appointment_time), None)
     if not chosen or not chosen["available"]: raise HTTPException(409, "That appointment slot was just taken. Please choose another time.")
     appt={"appointment_id":"apt_"+uuid.uuid4().hex[:10], "patient_id":user["user_id"], "patient_name":user["name"], "doctor_id":body.doctor_id, "doctor_name":doctor["name"], "specialization":doctor.get("specialization",""), "appointment_date":body.appointment_date, "appointment_time":body.appointment_time, "status":"confirmed", "created_at":now().isoformat()}
@@ -391,7 +400,7 @@ async def release_report(report_id: str, body: StatusUpdate, user=Depends(roles(
     report=await db.reports.find_one({"report_id":report_id},{"_id":0})
     if not report: raise HTTPException(404,"Report not found")
     await db.reports.update_one({"report_id":report_id},{"$set":{"visibility":body.status,"released_at":now().isoformat() if body.status=="patient_visible" else None}})
-    if body.status=="patient_visible": await notify(report["patient_id"],"Medical report released","A new medical document is available in your CareFlow account.","report")
+    if body.status=="patient_visible": await notify(report["patient_id"],"Medical report released","A new medical document is available in your CareSync account.","report")
     return {**report,"visibility":body.status}
 @api.get("/patient-documents")
 async def patient_documents(user=Depends(current_user)):
@@ -443,7 +452,7 @@ async def reminder_loop():
         due=await db.reminders.find({"sent":False,"scheduled_for":{"$lte":now().isoformat()}}).to_list(100)
         for item in due:
             changed=await db.reminders.update_one({"reminder_id":item["reminder_id"],"sent":False},{"$set":{"sent":True,"sent_at":now().isoformat()}})
-            if changed.modified_count: await notify(item["user_id"],"Appointment reminder","You have an upcoming appointment in CareFlow.","reminder")
+            if changed.modified_count: await notify(item["user_id"],"Appointment reminder","You have an upcoming appointment in CareSync.","reminder")
         await asyncio.sleep(60)
 
 async def seed():
@@ -458,16 +467,16 @@ async def seed():
                     for start, end in [("09:00", "13:00"), ("14:00", "17:00")]:
                         await db.availability.insert_one({"availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": d["user_id"], "weekday": wd, "start_time": start, "end_time": end, "duration": 30})
         return
-    clinic={"name":"CareFlow Medical Centre","type":"Multi-specialty clinic"}; await db.institutions.insert_one(clinic)
+    clinic={"name":"CareSync Medical Centre","type":"Multi-specialty clinic"}; await db.institutions.insert_one(clinic)
     docs=[("Dr. Sarah Mehta","General Medicine"),("Dr. Rahul Shah","Cardiology"),("Dr. Anika Rao","Dermatology"),("Dr. Vikram Iyer","Orthopedics"),("Dr. Mira Kapoor","Pediatrics")]
     for i,(name,spec) in enumerate(docs):
-        uid=f"demo_doctor_{i+1}"; await db.users.insert_one({"user_id":uid,"name":name,"email":f"doctor{i+1}@careflow.demo","role":"doctor","specialization":spec,"experience":f"{8+i} years","institution":"CareFlow Medical Centre","password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()})
+        uid=f"demo_doctor_{i+1}"; await db.users.insert_one({"user_id":uid,"name":name,"email":f"doctor{i+1}@careflow.demo","role":"doctor","specialization":spec,"experience":f"{8+i} years","institution":"CareSync Medical Centre","password_hash":pwd.hash("CareSync123!"),"created_at":now().isoformat()})
         for wd in range(5):
             for start, end in [("09:00", "13:00"), ("14:00", "17:00")]:
                 await db.availability.insert_one({"availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": uid, "weekday": wd, "start_time": start, "end_time": end, "duration": 30})
-    for role,email,name in [("patient","patient@careflow.demo","Aarav Sharma"),("admin","admin@careflow.demo","Clinic Admin")]: await db.users.insert_one({"user_id":"demo_"+role,"name":name,"email":email,"role":role,"password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()})
-    for i in range(8): await db.users.insert_one({"user_id":f"demo_patient_{i}","name":f"Demo Patient {i+1}","email":f"patient{i+1}@careflow.demo","role":"patient","password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()})
-    await notify("demo_patient","Welcome to CareFlow","Your secure healthcare coordination space is ready.","system")
+    for role,email,name in [("patient","patient@careflow.demo","Aarav Sharma"),("admin","admin@careflow.demo","Clinic Admin")]: await db.users.insert_one({"user_id":"demo_"+role,"name":name,"email":email,"role":role,"password_hash":pwd.hash("CareSync123!"),"created_at":now().isoformat()})
+    for i in range(8): await db.users.insert_one({"user_id":f"demo_patient_{i}","name":f"Demo Patient {i+1}","email":f"patient{i+1}@careflow.demo","role":"patient","password_hash":pwd.hash("CareSync123!"),"created_at":now().isoformat()})
+    await notify("demo_patient","Welcome to CareSync","Your secure healthcare coordination space is ready.","system")
 @app.on_event("startup")
 async def startup():
     global reminder_task

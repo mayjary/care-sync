@@ -1,0 +1,69 @@
+{
+  "summary": "FINAL consolidated QA for CareSync. Ran all 7 requested scenarios end-to-end. Backend: new consolidated pytest suite /app/backend/tests/test_final_qa.py = 19/19 passing on two consecutive runs (patient booking E2E + double-book 409, doctor weekly-schedule save/restore + validation + exception add/delete + cross-doctor 403, admin private-by-default upload -> release -> byte-exact patient download, report security matrix 404/403/401/200, patient-document upload+admin review+doctor 403, rescheduling flow with affected count / needs_rescheduling / notification content / empty slots / row preserved / rebook, health + env). Frontend (Playwright, public preview URL): patient login -> dashboard -> doctors (5 cards) -> booking dialog with 14 date options -> live slots -> booking-confirmation shown -> appointment persists after reload with status badge -> notifications render (30 rows incl. 'Appointment confirmed'); doctor login -> Availability page 7 day cards, duration 45 saved + verified after reload + restored, exception added and deleted; admin login -> Reports page upload (message 'Report uploaded privately'), release-report -> row shows 'Released', accept-document -> 'accepted', Availability shows schedule-doctor-select with 5 doctors and 7 day cards on switch; needs_rescheduling appointment shows amber badge + working Rebook link. Mobile 375/390: zero document-level horizontal overflow on /, /login, /app, /app/doctors (+dialog), /app/appointments, /app/records, /app/schedule (1 column), /app/uploads, /app/notifications; 1280 keeps 3-column schedule. Infra: /api/health = healthy/emergent/active, all env vars present, `yarn build` succeeded (exit 0), backend startup clean apart from the known benign passlib bcrypt-version trap. Auth spot-checks: all password hashes $2b$, cookie HttpOnly+Secure+SameSite=None, brute-force 401x5 then 429. One functional defect found (past-dated bookings accepted) plus several cosmetic/product-polish issues; all QA data cleaned up.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/slots/{doctor_id}/{date} and POST /api/appointments", "issue": "No past-time/past-date guard. GET /api/slots for TODAY returns already-elapsed times as available (at 15:46 UTC it returned 09:00-16:30 all available), and POST /api/appointments accepted a booking for 09:00 today AND for a date 3 days in the past (both returned 200 confirmed, with 24h/1h reminders scheduled in the past). Filter elapsed slots for today and reject appointment_date/time <= now.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "CORS middleware (server.py:89)", "issue": "allow_origin_regex='.*' with allow_credentials=True permits credentialed requests from any origin; the CORS_ORIGINS env var is defined in backend/.env but never read. Restrict to explicit origins before production."},
+      {"endpoint": "seed() (server.py:464-469)", "issue": "Fresh-database seed hashes demo passwords as 'CareSync123!' while /app/memory/test_credentials.md, PRD and all docs say 'CareFlow123!'. Existing preview DB still works (seed short-circuits when users exist), but a clean deploy will have credentials that do not match the documented ones."},
+      {"endpoint": "GET /api/reports (admin)", "issue": "Admin release queue returns every report with no pagination/limit; will not scale (patient/doctor lists are also unbounded)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Appointment card (App.js:26)", "issue": "Renders `item.doctor_name||item.patient_name`, so a doctor's own 'Appointments' list shows the doctor's own name on every row ('Dr. Sarah Mehta' x N) instead of the patient name. Should show patient_name for doctor/admin viewers.", "selector": "[data-testid^='appointment-']", "priority": "MEDIUM"},
+      {"component": "Dashboard 'Next up' / 'Today's schedule'", "issue": "Uses appointments[0] from a list sorted ascending by date, so it displays the OLDEST record - on the admin dashboard it showed a cancelled 21-Aug (past) appointment as 'Today's schedule'. Should pick the next future non-cancelled appointment.", "selector": "[data-testid='dashboard-appointments-link'] section", "priority": "MEDIUM"},
+      {"component": "Doctors booking dialog", "issue": "Success and error text share the same node/testid `booking-confirmation` (message state is reused for the 409 error), so automation/screen readers cannot distinguish a confirmed booking from a failure.", "selector": "[data-testid='booking-confirmation']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/app/uploads (mobile 375/390)", "issues": ["The upload panel and 'My submissions' rows are 3px (390px) / 18px (375px) wider than the viewport (panel left=16, right=393) and are clipped by body{overflow-x:hidden}: the card's right border and right padding are visually cut off. Fix the width/padding math (e.g. width:100% + box-sizing on .upload-panel/.admin-row inside .main)."]},
+      {"screen": "Browser tab / public/index.html", "issues": ["Document title is still 'Emergent | Fullstack App' and meta description 'A product of emergent.sh'; product name in UI should be CareSync."]},
+      {"screen": "/privacy /terms /disclaimer", "issues": ["Eyebrow label reads 'CAREFLOW / LEGAL' - last visible legacy product-name string in the UI; should read 'CARESYNC / LEGAL'."]},
+      {"screen": "Admin Reports queue", "issues": ["Raw DB enum shown to users: rows read 'demo_patient · patient_visible' / '· private'. Use human labels ('Released to patient' / 'Private')."]},
+      {"screen": "Doctor/Admin Availability - Time off", "issues": ["From/To use native browser date inputs (mm/dd/yyyy) rather than the available shadcn calendar/date-picker; inconsistent with the rest of the design system.", "'Block these dates' button visually overhangs the bottom-right corner of its panel at 1920px."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_final_qa.py",
+    "/app/test_reports/pytest/final_qa.xml",
+    "/app/backend/tests/auth_spotcheck_final.py",
+    "/app/backend/tests/probe_past_slot.py",
+    "/app/backend/tests/reschedule_ui_helper.py",
+    "/app/backend/tests/qa_cleanup_final.py"
+  ],
+  "action_items": [
+    "HIGH: reject past dates/times in POST /api/appointments and filter elapsed slots out of GET /api/slots for today's date (also skip creating already-past reminders).",
+    "Show patient_name (not doctor_name) on appointment cards for doctor/admin viewers.",
+    "Dashboard 'Next up' should select the next upcoming non-cancelled appointment, not appointments[0].",
+    "Fix /app/uploads mobile width overflow (3-18px clipped card edge).",
+    "Rename 'CAREFLOW / LEGAL' eyebrow to CareSync and set index.html <title>/description to CareSync.",
+    "Align seed() demo password with the documented CareFlow123! (currently CareSync123! on a fresh DB).",
+    "Restrict CORS to explicit origins (use the existing unused CORS_ORIGINS env var) instead of allow_origin_regex='.*' with credentials.",
+    "Humanise the visibility labels in the admin release queue and separate success/error testids in the booking dialog."
+  ],
+  "critical_code_review_comments": [
+    "server.py is a dense single file (492 very long lines); routes/auth/storage/notifications should be split into modules for maintainability, and one-line multi-statement bodies make diffs/debugging hard.",
+    "No time validation anywhere in the booking path - slots() only checks weekday rules, exceptions and existing bookings; add a `now()` cutoff.",
+    "release_report writes released_at=None when visibility flips back to private/archived, silently discarding audit history; consider keeping an audit trail instead.",
+    "reminder_loop has no try/except around the DB work; a transient Mongo error will kill the background task for the process lifetime (no restart/backoff).",
+    "GET /api/reports, /api/appointments, /api/patient-documents return unbounded lists (no limit/skip); notifications is the only capped query (30).",
+    "uvicorn --reload watches /app/backend/tests, so writing test files restarts the API; harmless for QA but worth knowing when timing tests."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_final_qa.py",
+    "/app/backend/tests/auth_spotcheck_final.py",
+    "/app/backend/tests/probe_past_slot.py",
+    "/app/backend/tests/reschedule_ui_helper.py",
+    "/app/backend/tests/qa_cleanup_final.py",
+    "/app/test_reports/iteration_final.json"
+  ],
+  "success_rate": {"backend": "100% (19/19 pytest, 2 consecutive runs) - excluding the past-date defect found by targeted probing", "frontend": "95% (all 7 UI scenarios pass; 1 mobile clipping + 3 cosmetic/logic display issues)"},
+  "seed_data_creation": "No new users. Temporary artifacts created and removed: TEST_QA_final_report / TEST_QA_UI_report reports, TEST_QA_patient_doc patient document, TEST_qa_* availability exceptions, and a handful of TEST appointments (cancelled, rows kept for history). Cleanup also removed 9 stale TEST* reports and 21 stale TEST* patient_documents left by earlier iterations, plus the probe's login_attempts row. Current DB: 2 reports, 4 patient documents, 0 exceptions, appointments 8 confirmed / 3 needs_rescheduling / 49 cancelled (mostly historic QA data - consider a demo-data reset before deploy).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md is accurate for the running preview DB (all seeded @careflow.demo accounts / CareFlow123!). NOTE: seed() would create CareSync123! on a fresh database - mismatch flagged above.",
+  "context_for_next_testing_agent": "Run only /app/backend/tests/test_final_qa.py for regression (19 cases, ~11s, classes are xdist-loadscope safe; each class cleans up after itself). Known open defect: past-dated/elapsed slot bookings are accepted (reproduce with /app/backend/tests/probe_past_slot.py). UI nav testids are label-derived: patient = navigation-find-a-doctor/appointments/my-records/my-uploads; doctor = navigation-my-schedule (appointments) and navigation-availability (weekly editor); admin = navigation-reports (AdminReports) and navigation-availability. The slot duration control is a native <select> (use select_option, not fill). `[data-testid^=\"notification-\"]` also matches notification-center-link - use div.notification for rows. Emergent object storage is live: uploads return storage_backend='emergent' with careflow/ prefix and downloads are byte-exact.",
+  "rca_of_the_issue": "Past-booking defect RCA: slots() (server.py:315) builds the slot grid purely from weekday availability rules, exception ranges and existing bookings, and book() (server.py:337) only re-checks that the requested time appears as available in that grid. Neither compares appointment_date/appointment_time against now(), so today's elapsed times and any historical date remain bookable; the reminder rows created afterwards are already in the past and are fired immediately by reminder_loop. Fix: in slots(), when appointment_date == today's UTC date, drop labels whose start <= now; in book(), 400 if the composed datetime is not in the future."
+}
