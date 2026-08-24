@@ -36,3 +36,5 @@ def test_booking_creates_two_unique_reminders_and_rebooking_after_cancel():
     rebooked = patient.post(f"{BASE_URL}/api/appointments", json=payload)
     assert rebooked.status_code == 200, rebooked.text
     assert rebooked.json()["appointment_id"] != appointment["appointment_id"]
+    # keep the suite idempotent: free the slot again for the next run
+    patient.patch(f"{BASE_URL}/api/appointments/{rebooked.json()['appointment_id']}", json={"status": "cancelled"})

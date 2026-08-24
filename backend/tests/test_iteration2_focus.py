@@ -43,4 +43,8 @@ def test_concurrent_same_slot_is_single_success():
     with ThreadPoolExecutor(max_workers=2) as pool:
         responses = list(pool.map(lambda s: s.post(f"{BASE_URL}/api/appointments", json=payload), patients))
     assert sorted(r.status_code for r in responses) == [200, 409]
-    assert "_id" not in next(r for r in responses if r.status_code == 200).json()
+    winner = next(r for r in responses if r.status_code == 200).json()
+    assert "_id" not in winner
+    # keep the suite idempotent: free the slot again for the next run
+    for s in patients:
+        s.patch(f"{BASE_URL}/api/appointments/{winner['appointment_id']}", json={"status": "cancelled"})

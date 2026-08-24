@@ -8,7 +8,7 @@ from passlib.context import CryptContext
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
 from typing import Optional
-import os, uuid, jwt, logging, hashlib, mimetypes, requests, asyncio
+import os, uuid, jwt, logging, hashlib, mimetypes, requests, asyncio, re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -34,6 +34,10 @@ class Login(BaseModel): email: EmailStr; password: str
 class Register(BaseModel): name: str; email: EmailStr; password: str; role: str = "patient"
 class AppointmentCreate(BaseModel): doctor_id: str; appointment_date: str; appointment_time: str
 class AvailabilityCreate(BaseModel): doctor_id: Optional[str] = None; weekday: int = Field(ge=0, le=6); start_time: str; end_time: str; duration: int = 30
+class Period(BaseModel): start_time: str; end_time: str
+class WeeklyDay(BaseModel): weekday: int = Field(ge=0, le=6); periods: list[Period] = []; duration: int = 30
+class WeeklySchedule(BaseModel): schedule: list[WeeklyDay]
+class ExceptionCreate(BaseModel): start_date: str; end_date: str; reason: Optional[str] = ""
 class StatusUpdate(BaseModel): status: str
 class NoteCreate(BaseModel): note: str
 class ReviewUpdate(BaseModel): status: str
@@ -103,19 +107,96 @@ async def doctor(doctor_id: str):
 async def set_availability(body: AvailabilityCreate, user=Depends(roles("doctor", "admin"))):
     doctor_id = user["user_id"] if user["role"] == "doctor" else body.doctor_id
     if not doctor_id or not await db.users.find_one({"user_id": doctor_id, "role": "doctor"}, {"_id": 1}): raise HTTPException(400, "Choose a valid doctor")
-    item = {"availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": doctor_id, **body.model_dump()}; await db.availability.update_one({"doctor_id": doctor_id, "weekday": body.weekday}, {"$set": item}, upsert=True); return item
+    if not TIME_RE.match(body.start_time) or not TIME_RE.match(body.end_time): raise HTTPException(400, "Times must be HH:MM in 24-hour format")
+    if body.start_time >= body.end_time: raise HTTPException(400, "Each period must start before it ends")
+    if body.duration < 5 or body.duration > 240: raise HTTPException(400, "Appointment length must be between 5 and 240 minutes")
+    item = {**body.model_dump(), "availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": doctor_id}
+    await db.availability.insert_one(item); return public(item)
+
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+def _check_owner(user, doctor_id):
+    if user["role"] == "doctor" and user["user_id"] != doctor_id:
+        raise HTTPException(403, "You can only manage your own schedule")
+
+@api.get("/availability/{doctor_id}")
+async def get_weekly(doctor_id: str, user=Depends(current_user)):
+    if not await db.users.find_one({"user_id": doctor_id, "role": "doctor"}, {"_id": 1}): raise HTTPException(404, "Doctor not found")
+    rules = [public(x) async for x in db.availability.find({"doctor_id": doctor_id}, {"_id": 0}).sort("start_time", 1)]
+    schedule = []
+    for wd in range(7):
+        day_rules = [r for r in rules if r["weekday"] == wd]
+        schedule.append({"weekday": wd, "periods": [{"start_time": r["start_time"], "end_time": r["end_time"]} for r in day_rules], "duration": day_rules[0]["duration"] if day_rules else 30})
+    exceptions = [public(x) async for x in db.availability_exceptions.find({"doctor_id": doctor_id}, {"_id": 0}).sort("start_date", 1)]
+    return {"schedule": schedule, "exceptions": exceptions}
+
+@api.put("/availability/{doctor_id}")
+async def save_weekly(doctor_id: str, body: WeeklySchedule, user=Depends(roles("doctor", "admin"))):
+    _check_owner(user, doctor_id)
+    if not await db.users.find_one({"user_id": doctor_id, "role": "doctor"}, {"_id": 1}): raise HTTPException(404, "Doctor not found")
+    by_weekday = {}
+    for day in body.schedule:
+        for p in day.periods:
+            if not TIME_RE.match(p.start_time) or not TIME_RE.match(p.end_time): raise HTTPException(400, "Times must be HH:MM in 24-hour format")
+            if p.start_time >= p.end_time: raise HTTPException(400, "Each period must start before it ends")
+        if day.duration < 5 or day.duration > 240: raise HTTPException(400, "Appointment length must be between 5 and 240 minutes")
+        by_weekday.setdefault(day.weekday, []).extend([(p.start_time, p.end_time) for p in day.periods])
+    for wd, periods in by_weekday.items():
+        srt = sorted(periods)
+        for i in range(1, len(srt)):
+            if srt[i][0] < srt[i - 1][1]: raise HTTPException(400, "Periods on the same day cannot overlap")
+    await db.availability.delete_many({"doctor_id": doctor_id})
+    for day in body.schedule:
+        for p in day.periods:
+            await db.availability.insert_one({"availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": doctor_id, "weekday": day.weekday, "start_time": p.start_time, "end_time": p.end_time, "duration": day.duration})
+    return {"ok": True}
+
+@api.post("/availability/{doctor_id}/exceptions")
+async def add_exception(doctor_id: str, body: ExceptionCreate, user=Depends(roles("doctor", "admin"))):
+    _check_owner(user, doctor_id)
+    if not await db.users.find_one({"user_id": doctor_id, "role": "doctor"}, {"_id": 1}): raise HTTPException(404, "Doctor not found")
+    try: s = date.fromisoformat(body.start_date); e = date.fromisoformat(body.end_date)
+    except ValueError: raise HTTPException(400, "Invalid dates")
+    if s > e: raise HTTPException(400, "Start date must be on or before end date")
+    ex = {"exception_id": "ex_" + uuid.uuid4().hex[:10], "doctor_id": doctor_id, "start_date": body.start_date, "end_date": body.end_date, "reason": body.reason or "", "created_at": now().isoformat()}
+    await db.availability_exceptions.insert_one(ex)
+    ex.pop("_id", None)
+    doctor = await db.users.find_one({"user_id": doctor_id}, {"_id": 0})
+    doctor_name = (doctor or {}).get("name", "Your doctor")
+    affected = await db.appointments.find({"doctor_id": doctor_id, "status": {"$in": ["confirmed", "requested"]}, "appointment_date": {"$gte": body.start_date, "$lte": body.end_date}}, {"_id": 0}).to_list(500)
+    for a in affected:
+        await db.appointments.update_one({"appointment_id": a["appointment_id"]}, {"$set": {"status": "needs_rescheduling", "unavailability_reason": ex["reason"] or "Doctor unavailable"}})
+        await db.slot_locks.delete_one({"appointment_id": a["appointment_id"]})
+        await notify(a["patient_id"], "Appointment needs rescheduling", f"Your appointment with {doctor_name} on {a['appointment_date']} at {a['appointment_time']} needs to be rescheduled. Please choose a new time.", "reschedule")
+    return {**ex, "affected": len(affected)}
+
+@api.delete("/availability/exceptions/{exception_id}")
+async def delete_exception(exception_id: str, user=Depends(roles("doctor", "admin"))):
+    ex = await db.availability_exceptions.find_one({"exception_id": exception_id}, {"_id": 0})
+    if not ex: raise HTTPException(404, "Unavailability block not found")
+    _check_owner(user, ex["doctor_id"])
+    await db.availability_exceptions.delete_one({"exception_id": exception_id})
+    return {"ok": True}
+
 @api.get("/slots/{doctor_id}/{appointment_date}")
 async def slots(doctor_id: str, appointment_date: str):
     try: day = date.fromisoformat(appointment_date)
     except ValueError: raise HTTPException(400, "Invalid date")
-    rule = await db.availability.find_one({"doctor_id": doctor_id, "weekday": day.weekday()}, {"_id": 0})
-    if not rule: return []
-    def mins(v): h,m=map(int,v.split(":")); return h*60+m
-    booked = await db.appointments.find({"doctor_id": doctor_id, "appointment_date": appointment_date, "status": {"$nin": ["cancelled"]}}, {"_id": 0, "appointment_time": 1}).to_list(100)
-    taken = {x["appointment_time"] for x in booked}; out=[]; cur=mins(rule["start_time"]); end=mins(rule["end_time"])
-    while cur + rule["duration"] <= end:
-        label=f"{cur//60:02d}:{cur%60:02d}"; out.append({"time":label,"available":label not in taken}); cur += rule["duration"]
-    return out
+    if await db.availability_exceptions.find_one({"doctor_id": doctor_id, "start_date": {"$lte": appointment_date}, "end_date": {"$gte": appointment_date}}, {"_id": 0}): return []
+    rules = await db.availability.find({"doctor_id": doctor_id, "weekday": day.weekday()}, {"_id": 0}).to_list(50)
+    if not rules: return []
+    def mins(v): h, m = map(int, v.split(":")); return h * 60 + m
+    booked = await db.appointments.find({"doctor_id": doctor_id, "appointment_date": appointment_date, "status": {"$nin": ["cancelled", "needs_rescheduling"]}}, {"_id": 0, "appointment_time": 1}).to_list(200)
+    taken = {x["appointment_time"] for x in booked}
+    out = []; seen = set()
+    for r in sorted(rules, key=lambda x: x["start_time"]):
+        cur = mins(r["start_time"]); end = mins(r["end_time"]); dur = r.get("duration", 30)
+        while cur + dur <= end:
+            label = f"{cur//60:02d}:{cur%60:02d}"
+            if label not in seen:
+                seen.add(label); out.append({"time": label, "available": label not in taken})
+            cur += dur
+    return sorted(out, key=lambda x: x["time"])
 
 async def notify(user_id, title, message, kind="appointment"):
     await db.notifications.insert_one({"notification_id":"nt_"+uuid.uuid4().hex[:10], "user_id":user_id, "title":title, "message":message, "kind":kind, "read":False, "created_at":now().isoformat()})
@@ -206,6 +287,15 @@ async def report_file(report_id: str, user=Depends(current_user)):
     path=UPLOAD_DIR/r["file_id"]
     if not path.exists(): raise HTTPException(404,"This report is no longer available")
     return FileResponse(path, media_type=r["content_type"], filename=r["file_name"])
+@api.get("/patient-documents/{document_id}/file")
+async def patient_document_file(document_id: str, user=Depends(current_user)):
+    doc = await db.patient_documents.find_one({"document_id": document_id}, {"_id": 0})
+    if not doc: raise HTTPException(404, "Document is not available")
+    if user["role"] == "patient" and doc["patient_id"] != user["user_id"]: raise HTTPException(404, "Document is not available")
+    if user["role"] == "doctor": raise HTTPException(403, "You are not authorized to access this document")
+    path = UPLOAD_DIR / doc["file_id"]
+    if not path.exists(): raise HTTPException(404, "Document is not available")
+    return FileResponse(path, media_type=doc["content_type"], filename=doc["file_name"])
 @api.get("/dashboard")
 async def dashboard(user=Depends(current_user)):
     q={"patient_id":user["user_id"]} if user["role"]=="patient" else ({"doctor_id":user["user_id"]} if user["role"]=="doctor" else {})
@@ -223,11 +313,21 @@ async def seed():
     if await db.users.count_documents({}) > 0:
         if await db.patient_documents.count_documents({}) == 0:
             await db.patient_documents.insert_one({"document_id":"demo_doc_1","patient_id":"demo_patient","patient_name":"Aarav Sharma","title":"Previous blood test","file_id":"demo-file","file_name":"previous-blood-test.pdf","file_size":0,"content_type":"application/pdf","status":"pending_review","created_at":now().isoformat()})
+        async for d in db.users.find({"role":"doctor"},{"user_id":1}):
+            existing_weekdays = await db.availability.distinct("weekday", {"doctor_id": d["user_id"]})
+            if len(existing_weekdays) < 5:
+                await db.availability.delete_many({"doctor_id": d["user_id"]})
+                for wd in range(5):
+                    for start, end in [("09:00", "13:00"), ("14:00", "17:00")]:
+                        await db.availability.insert_one({"availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": d["user_id"], "weekday": wd, "start_time": start, "end_time": end, "duration": 30})
         return
     clinic={"name":"CareFlow Medical Centre","type":"Multi-specialty clinic"}; await db.institutions.insert_one(clinic)
     docs=[("Dr. Sarah Mehta","General Medicine"),("Dr. Rahul Shah","Cardiology"),("Dr. Anika Rao","Dermatology"),("Dr. Vikram Iyer","Orthopedics"),("Dr. Mira Kapoor","Pediatrics")]
     for i,(name,spec) in enumerate(docs):
-        uid=f"demo_doctor_{i+1}"; await db.users.insert_one({"user_id":uid,"name":name,"email":f"doctor{i+1}@careflow.demo","role":"doctor","specialization":spec,"experience":f"{8+i} years","institution":"CareFlow Medical Centre","password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()}); await db.availability.insert_one({"availability_id":"av_"+uuid.uuid4().hex[:10],"doctor_id":uid,"weekday":i%5,"start_time":"09:00","end_time":"17:00","duration":30})
+        uid=f"demo_doctor_{i+1}"; await db.users.insert_one({"user_id":uid,"name":name,"email":f"doctor{i+1}@careflow.demo","role":"doctor","specialization":spec,"experience":f"{8+i} years","institution":"CareFlow Medical Centre","password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()})
+        for wd in range(5):
+            for start, end in [("09:00", "13:00"), ("14:00", "17:00")]:
+                await db.availability.insert_one({"availability_id": "av_" + uuid.uuid4().hex[:10], "doctor_id": uid, "weekday": wd, "start_time": start, "end_time": end, "duration": 30})
     for role,email,name in [("patient","patient@careflow.demo","Aarav Sharma"),("admin","admin@careflow.demo","Clinic Admin")]: await db.users.insert_one({"user_id":"demo_"+role,"name":name,"email":email,"role":role,"password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()})
     for i in range(8): await db.users.insert_one({"user_id":f"demo_patient_{i}","name":f"Demo Patient {i+1}","email":f"patient{i+1}@careflow.demo","role":"patient","password_hash":pwd.hash("CareFlow123!"),"created_at":now().isoformat()})
     await notify("demo_patient","Welcome to CareFlow","Your secure healthcare coordination space is ready.","system")

@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 7 targeted regression on the 8 fixes to iteration-6 findings. Backend: 98/98 pytest tests pass (31 new iteration-7 tests + 67 prior regression tests) on the public URL. FIX 1 verified: POST /api/availability now rejects malformed times ('99:99', 'aa:bb', '9:0', '25:00'), start>=end and durations 4/0/-10/241/999 with 400, and the computed doctor_id is persisted correctly (doctor caller -> own id, admin caller -> body.doctor_id, invalid/absent doctor -> 400, patient -> 403); the stored row shows up on GET /api/availability/{id} and generates real slots (Sunday 18:00-20:00 @20min). FIX 2 verified: PUT groups periods by weekday - two same-weekday entries that overlap (09:00-12:00 + 10:00-13:00) and a contained period (09:00-17:00 + 10:00-11:00) both return 400 'Periods on the same day cannot overlap', while adjacent (09:00-12:00 + 12:00-15:00) and disjoint (09:00-11:00 + 14:00-16:00) same-weekday entries store correctly, and in-entry overlaps still 400. FIX 6 verified: GET /api/patient-documents/{id}/file owner 200 byte-exact, other patient 404, doctor 403, admin 200, unauthenticated 401, unknown id 404. FIX 7 data path verified: block -> status needs_rescheduling + patient notification + blocked date returns no slots + DELETE restores the slot. Frontend (Playwright, public URL): FIX 3 nav highlight correct on every client-side navigation (exactly one .active link, matching the route, for all 4 doctor nav items); FIX 4 overlap save renders data-testid=schedule-message with class 'schedule-alert error' (bg rgb(255,240,239), text 'Periods on the same day cannot overlap') while a successful save renders plain 'schedule-alert'; FIX 5 admin schedule-doctor-select never unmounts across 3 doctor switches (polled every 40ms) and keeps its value; FIX 6 view-document-{id} buttons render for every submission, href points at /api/patient-documents/{id}/file and returns 200 application/pdf (also verified end-to-end on a freshly uploaded document, byte-exact); FIX 7 rebook-{id} link present on the single needs_rescheduling row, absent on all 10 other rows, and navigates to /app/doctors; FIX 8 empty title/file yields 'schedule-alert error' red box on /app/uploads. Responsive: /app/schedule grid 1 track @375px (345px) and @390px (358.8px), 3 tracks @1280px, zero horizontal overflow; /app/uploads .admin-report-grid 1 track @375/390, 2 tracks @1280, zero overflow.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/availability/{doctor_id}", "issue": "duration is still taken from the first rule of the day only (day_rules[0]['duration']), so a legacy POST that writes a different duration for a second period on the same weekday is silently reported with the first period's duration. Slot generation does honour per-rule duration, so GET and /slots can disagree."},
+      {"endpoint": "POST /api/availability (legacy)", "issue": "Still has no overlap check against existing rules for the same weekday, so the legacy endpoint can create overlapping periods that PUT would reject (400). Duplicate slot labels are de-duplicated in /slots so impact is cosmetic, but validation is inconsistent between the two write paths."},
+      {"endpoint": "PUT /api/availability/{doctor_id}", "issue": "Unchanged from iteration 6: delete_many + N inserts with no transaction/bulk_write; a mid-write failure leaves a partial schedule."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/app/uploads (patient)", "issues": ["19 leftover TEST_/UITEST submissions make the 'Review status' column extremely long with no pagination, filter or scroll container; consider capping/pagination (also no delete endpoint exists so accumulated rows cannot be removed)."]},
+      {"screen": "/app/schedule (doctor, 1920)", "issues": ["Cards still have unequal heights so the auto-fill grid looks staggered (Saturday/Sunday short cards leave gaps); align-items:start is applied but a consistent min-height would tidy it."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration7_fixes.py",
+    "/app/backend/tests/iteration7_ui_setup.py",
+    "/app/backend/tests/iteration7_probe.py",
+    "/app/test_reports/pytest/iteration_7_results.xml"
+  ],
+  "action_items": [
+    "Optional hardening only: make GET /api/availability represent per-period durations (or forbid mixed durations per weekday), and apply the same overlap check to the legacy POST /api/availability so both write paths agree.",
+    "Optional: cap/paginate the patient 'Review status' list on /app/uploads and provide a way to remove test/obsolete submissions."
+  ],
+  "critical_code_review_comments": [
+    "All 8 reported fixes are correctly implemented in /app/backend/server.py (lines 106-152) and /app/frontend/src/App.js (Shell useLocation, Schedule msg={text,error} + always-mounted picker, Uploads view link, Appointment rebook link).",
+    "Two legacy pytest tests (test_iteration2_focus.py::test_concurrent_same_slot_is_single_success and test_iteration3_reminders.py) were non-idempotent: they book fixed 09:00/10:00 slots on the next Monday and never released them, so re-runs failed with 409 on stale confirmed appointments. Added cleanup cancels (test-code fix only) and cancelled the two stale appointments apt_308db58053 / apt_ef3538bf9d.",
+    "App.js is still a single dense 144-line file with very long lines; splitting Schedule/Uploads into modules remains advisable for maintainability.",
+    "Emergent dev-overlay injects <span> inside <option> causing a React hydration warning in console on /app/schedule; not app code, no functional impact."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration7_fixes.py (new, 31 tests)",
+    "/app/backend/tests/iteration7_ui_setup.py (new helper: setup/cleanup needs_rescheduling appointment)",
+    "/app/backend/tests/iteration7_probe.py (new diagnostic for stale-slot contamination)",
+    "/app/backend/tests/test_iteration2_focus.py (idempotency cleanup only)",
+    "/app/backend/tests/test_iteration3_reminders.py (idempotency cleanup only)"
+  ],
+  "success_rate": {"backend": "100% (98/98)", "frontend": "100% of the 6 UI fixes + responsive checks passed"},
+  "seed_data_creation": "Transient: TEST_it7_* patient documents (patient@careflow.demo), one UITEST it7 fresh upload via the UI, temporary availability edits on demo_doctor_3, and a booked+blocked appointment on demo_doctor_4 for 2026-09-18. Cleanup done: UITEST exception deleted, needs_rescheduling appointment cancelled, all 5 demo doctors restored to Mon-Fri 09:00-13:00 + 14:00-17:00 @30min with zero exceptions, stale confirmed appointments on 2026-08-31 cancelled. Patient documents remain (no delete endpoint).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "patient@careflow.demo, patient2@careflow.demo, doctor1@careflow.demo, doctor3/doctor4@careflow.demo, admin@careflow.demo - all CareFlow123! (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Run backend suite with `export REACT_APP_BACKEND_URL=<public url>` (backend_test.py and test_iteration3_reminders.py read os.environ without a .env fallback); pytest.ini forces -n 2 --dist loadscope, use -n 0 for serial. New file: tests/test_iteration7_fixes.py. Notes: patient-document uploads only accept PDF/JPG/PNG content types and the API returns status 'pending_review'; slots endpoint is GET /api/slots/{doctor_id}/{date} returning [{time, available}]; appointment status update is PATCH /api/appointments/{id}. Helpers: tests/iteration6_helper.py restore|status resets all 5 demo doctors; tests/iteration7_ui_setup.py setup|cleanup creates/removes a needs_rescheduling appointment for patient@careflow.demo. Unverified areas: Google OAuth, reminder scheduler timing, load/concurrency beyond the 2-thread double-booking test.",
+  "rca_of_the_issue": "No product defects found this iteration. The only failures in the first full run were environmental: earlier iterations left confirmed appointments at 09:00 and 10:00 on 2026-08-31 for demo_doctor_1, which the fixed-slot legacy tests re-book, producing 409. Root cause = non-idempotent test code, not application behaviour; fixed by cancelling the stale rows and adding cleanup to those two tests. All 98 tests then passed twice in a row."
+}

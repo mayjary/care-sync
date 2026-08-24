@@ -25,29 +25,36 @@ Build CareFlow, a production-oriented healthcare coordination platform connectin
 - Patient booking journey from directory: 14-day date calendar, live availability, selectable times, confirmation, backend appointment creation.
 - Clinic admin report workspace: private-by-default upload, explicit release to patient, and pending patient-document review (accept/reject).
 
-### 2026-08-24 (final QA pass)
-- Fixed mobile responsive bug: duplicate `.admin-report-grid` rule after the `@media(max-width:850px)` override was removed from `App.css`. Verified computed `grid-template-columns` is a single track at 375/390px and two tracks at 1200px; review queue stacks below the upload panel; no horizontal overflow.
-- Restricted `GET /api/reports/{id}/file` for doctors to reports they uploaded (was previously unrestricted for the doctor role).
-- Replaced hard-coded `demo_admin` notification target in patient-document upload with a fan-out to every user with `role=admin`.
-- Added self-isolated concurrent-booking regression test (`test_concurrent_booking_fresh_slot_isolated`) that always picks a fresh future date/slot so `[409,409]` from stale fixtures cannot recur.
-- Testing-agent iteration 5: 18/18 backend assertions pass, admin/patient UI flows pass, responsive grid pass.
+### 2026-08-24 (QA hardening pass)
+- Fixed mobile duplicate `.admin-report-grid` rule; grid now correctly single-column at 375/390px.
+- Doctor-scoped report file access; patient-document upload now fans out to all admins.
+- Added self-isolated concurrent-booking regression test.
+
+### 2026-08-24 (feature pass — availability, unavailability, patient uploads)
+- **Doctor Availability Editor** (`/app/schedule`): weekly view with 7 day cards, add/remove periods per day, per-day slot duration (15/20/30/45/60), mark day unavailable, saves through `PUT /api/availability/{doctor_id}` with server-side validation (HH:MM format, start<end, no overlaps per weekday including across duplicate entries, duration 5–240). Doctors edit their own; admin can edit any doctor via `schedule-doctor-select`. Slot generation reads live weekly rules and returns [] for dates inside an exception range.
+- **Doctor Unavailability**: `POST /api/availability/{doctor_id}/exceptions` blocks a date range, flags every affected confirmed appointment as `needs_rescheduling` (original preserved), releases the slot lock, and sends a notification containing doctor name + date + time. `DELETE /api/availability/exceptions/{id}` removes a block. Appointments outside the range are untouched. UI: "Time off" form on `/app/schedule`, appointments in `needs_rescheduling` show a **Rebook** CTA that jumps to `/app/doctors`.
+- **Patient Uploads Page** (`/app/uploads`): patients submit past reports (multipart PDF/JPG/PNG), see live status (pending / accepted / rejected) via colored badges, and can View any submitted document via `GET /api/patient-documents/{document_id}/file` (owner-only for patients; admins can view; doctors 403).
+- Legacy `POST /api/availability` retained for backwards compatibility, but now validates time format, start<end, duration bounds and always persists the computed `doctor_id`.
+- Shell nav highlight switched to `useLocation()` for reliable React Router active state.
+- Error vs. success messaging now uses dedicated `.schedule-alert.error` styling; overlap and file errors show red, saves show mint-green.
+- Verified: 98/98 backend pytest assertions (31 new for these features + 67 prior) and all UI fixes across 375/390/1280px.
 
 ## Prioritized backlog
 ### P0 — none open
 
 ### P1
-- Doctor unavailability workflow: mark blocks, identify affected appointments, notify patients, and offer alternate slots.
-- Doctor availability editor UI and appointment status management (reschedule/cancel/no-show) from doctor and admin dashboards.
-- Patient-facing UI to submit personal documents and see the accepted/rejected status (endpoint already implemented).
 - End-to-end verification of Google OAuth callback flow against configured provider.
 - Report versioning, archival, and richer report viewer (PDF zoom / pagination).
+- Optional: per-period duration in `GET /api/availability` and overlap validation in legacy `POST /api/availability` to match `PUT`.
+- Optional: cap/paginate the patient "My submissions" list on `/app/uploads`; add a delete endpoint for patient-uploaded documents.
 
 ### P2
 - Rate limiting, audit-log viewer, report access audit trail, CSRF/session posture review.
-- Institution branches/departments, pagination, timezone preferences, accessibility audit, and translations.
+- Institution branches/departments, timezone preferences, accessibility audit, and translations.
 - Optional platform-level super-admin surface.
+- Reformat monolithic `server.py` and `App.js` into modules.
 
 ## Next tasks
-1. Doctor unavailability + reschedule workflow.
-2. Patient personal document upload UI.
-3. Doctor availability editor + admin appointment status controls.
+1. Google OAuth end-to-end verification.
+2. Report viewer improvements (PDF zoom / pagination / image fullscreen).
+3. Optional legacy `POST /api/availability` deprecation.

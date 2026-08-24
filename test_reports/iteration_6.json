@@ -1,0 +1,58 @@
+{
+  "summary": "Iteration 6 regression on CareFlow availability editor, doctor unavailability blocks and patient uploads. Backend: 67/67 pytest assertions pass across the new suite (39) plus all prior regression suites (28) — GET/PUT /api/availability/{doctor_id} shape (7 ordered weekdays, periods, duration, exceptions, no _id), PUT validation (overlap 400, start>=end 400, '25:00'/'9:0' 400, duration 4/0/-10/241 400, weekday>6 422), RBAC (doctor cannot PUT/POST-exception for another doctor 403, patient 403, admin can edit any, GET requires auth 401), slot regeneration immediately after PUT (07:00-08:00/30min -> ['07:00','07:30'], empty periods -> [], two periods -> sorted union), exceptions CRUD (create returns exception_id+affected, blocks every date in range, DELETE by owner/admin, 404 unknown id/doctor, invalid dates and start>end 400), block-over-confirmed-appointment flow (status -> needs_rescheduling, original date/time preserved, slot_lock released and slot rebookable, patient notification containing doctor name + date + time, appointment outside range untouched), schedule change does NOT delete existing appointments, and patient-document upload/list/status + new GET /api/patient-documents/{id}/file (own 200 byte-exact, other patient 404, doctor 403, admin 200, unauth 401, unknown 404). Frontend: doctor -> sidebar Availability -> /app/schedule renders 7 day cards, time edit / add-period / remove-period / mark-unavailable / duration all work, save shows success and values persist across reload, overlapping periods surface the backend 400 detail in schedule-message; time-off form creates a block ('Unavailability saved. N existing appointment(s) were flagged'), the block appears in the list and remove-exception-{id} deletes it; admin sees schedule-doctor-select with all 5 doctors, switching loads that doctor's schedule and admin can save it; patient /app/uploads submits multipart, shows 'Document sent to your clinic for review.', new row appears with PENDING badge, admin accept flips the patient badge to ACCEPTED (class doc-accepted). Full e2e verified in the UI: patient books 09:00 on 2026-09-02 -> doctor5 blocks that date -> patient appointment shows 'needs rescheduling' + notification 'Your appointment with Dr. Mira Kapoor on 2026-09-02 at 09:00 needs to be rescheduled' -> blocked date shows 'No appointments available on this date.' -> after the doctor removes the block the original 09:00 slot is free and rebooking succeeds. Responsive: .schedule-grid = 1 track at 375px (345px) and 390px (358.8px), 3 tracks at 1280px, zero horizontal overflow at all widths; .admin-report-grid on /app/uploads is 1 track at 375/390 and 2 tracks at 1280.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/availability (legacy)", "issue": "Row is persisted with doctor_id=null: the dict is built as {..., 'doctor_id': doctor_id, **body.model_dump()} and model_dump() re-injects the request's doctor_id (None for a doctor caller), overwriting the computed value. Result: orphaned availability rows that never affect any doctor's schedule. Also this endpoint performs NO time/duration validation (accepted start_time '99:99', end_time 'aa:bb', duration 999 with HTTP 200), unlike PUT /api/availability/{id}. Recommend deleting the legacy endpoint or routing it through the same validation and putting the computed doctor_id last."},
+      {"endpoint": "PUT /api/availability/{doctor_id}", "issue": "Overlap validation is per schedule-array item, not per weekday. A payload with two entries for the same weekday (e.g. weekday 0 09:00-12:00 and weekday 0 10:00-13:00) returns 200 and stores overlapping periods. The UI cannot produce this, but the API can. Group periods by weekday before the overlap check."},
+      {"endpoint": "GET /api/availability/{doctor_id}", "issue": "duration is read from the first rule of the day only (day_rules[0]['duration']), so per-period durations cannot be represented; harmless today because PUT writes one duration per day, but it silently drops data written by the legacy POST endpoint."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Schedule / Uploads messages", "issue": "Errors and successes share the same green success box (.booking-message). The backend 400 'Periods on the same day cannot overlap' and 'Upload failed' render in mint/green with success-green text, which reads as confirmation. An unused .form-error style already exists — switch on error state.", "selector": "[data-testid=\"schedule-message\"], [data-testid=\"upload-message\"]", "priority": "MEDIUM"},
+      {"component": "Schedule (admin)", "issue": "The doctor picker unmounts while a schedule is loading: the early returns `if(!data&&loading)` and `if(!doctorId)` render a page without schedule-doctor-select, so the control flashes out on every doctor switch/reload (caused a transient element-not-found in automation). Keep the picker mounted and show a loading state inside the grid.", "selector": "[data-testid=\"schedule-doctor-select\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Patient uploads", "issue": "GET /api/patient-documents/{id}/file is implemented and works, but /app/uploads has no view/download link, so a patient can never re-open their own submitted document from the UI.", "affected_selectors": ["[data-testid^=\"my-document-\"]"]},
+      {"flow": "Rescheduling after a doctor block", "issue": "An appointment flagged 'needs rescheduling' has no rebook CTA on the appointment row; the patient has to work out on their own to go to 'Find a doctor'. Rebooking itself works. Also the flagged row stays in the list forever next to the new booking with no 'superseded' marker.", "affected_selectors": ["[data-testid^=\"appointment-status-\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "/app/schedule (desktop 1920)", "issues": ["Cards of unequal height in an auto-fill grid leave a ragged, staggered layout (Thursday/Friday/Saturday rows visually offset); consider align-items:start plus consistent min-height.", "The save button sits directly under the grid with no sticky/affordance on long pages — on mobile it is far below 7 stacked day cards."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration6_availability.py",
+    "/app/backend/tests/iteration6_edge_probe.py",
+    "/app/backend/tests/iteration6_helper.py",
+    "/app/backend/tests/iteration6_cleanup.py",
+    "/app/test_reports/pytest/iteration_6_results.xml"
+  ],
+  "action_items": [
+    "Fix legacy POST /api/availability: it stores doctor_id=null and skips all time/duration validation (or remove the endpoint entirely).",
+    "Group periods by weekday in PUT /api/availability validation so duplicate weekday entries cannot store overlapping periods.",
+    "Render error messages in schedule-message / upload-message with error styling instead of the green success box.",
+    "Keep schedule-doctor-select mounted while the schedule is loading (admin).",
+    "Add a view/download link on /app/uploads using GET /api/patient-documents/{id}/file, and a rebook CTA on 'needs rescheduling' appointments."
+  ],
+  "critical_code_review_comments": [
+    "server.py returns raw mongo-mutated dicts in places; POST /api/availability was returning the insert_one-mutated dict and 500'ing with \"ObjectId is not iterable\" — fixed by wrapping in public(). Audit any other endpoint that returns a dict passed to insert_one.",
+    "Shell() computes the active nav class from the global window.location.pathname instead of react-router's useLocation(), so the highlight is derived from a value React does not track — use useLocation().",
+    "Availability is modelled as one document per period; the weekly PUT does delete_many + N inserts with no transaction, so a mid-write failure leaves the doctor with a partial (or empty) schedule. Consider a single document per doctor/weekday or a bulk_write.",
+    "App.js (141 dense lines) and server.py (339 dense lines) pack many statements per line; split Schedule/Uploads into their own modules for maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (single in-scope fix: POST /api/availability now returns public(item) to stop the ObjectId serialization 500)",
+    "/app/backend/tests/test_iteration6_availability.py",
+    "/app/backend/tests/iteration6_helper.py",
+    "/app/backend/tests/iteration6_cleanup.py",
+    "/app/backend/tests/iteration6_edge_probe.py"
+  ],
+  "success_rate": {"backend": "100% (67/67 including 39 new iteration-6 tests)", "frontend": "100% of tested flows; 4 non-blocking UI/UX issues reported"},
+  "seed_data_creation": "Transient only: TEST_/UITEST patient documents, temporary availability edits on demo_doctor_1..5 and a few appointments for patient1/patient2. All demo doctors were restored to Mon–Fri 09:00-13:00 + 14:00-17:00 @30min, UITEST exception blocks deleted, test appointments cancelled and 3 orphan availability rows (doctor_id=null created by the legacy POST probe) removed. Leftover from earlier sessions and intentionally kept: exception ex_8b1fff6145 (demo_doctor_1, 2026-09-09, 'Personal leave') and a few TEST_/UITEST patient_documents rows (no delete endpoint exists).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "patient@careflow.demo, patient1/patient2@careflow.demo, doctor1/doctor5@careflow.demo, admin@careflow.demo — all CareFlow123! (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "New suite: /app/backend/tests/test_iteration6_availability.py (run with `-n 0` for serial; pytest.ini forces -n 2 --dist loadscope, do not use -p no:xdist). backend_test.py requires REACT_APP_BACKEND_URL in the environment (it does os.environ[...] without a .env fallback) — export it or the whole run aborts at collection. Helper scripts iteration6_helper.py (status/restore/block) restore all 5 demo doctors to the default weekly schedule; use them after any availability test. All three iteration-6 features (weekly editor, unavailability blocks + reschedule notifications, patient uploads) are verified working end-to-end on the public URL. Unverified areas: Google OAuth, reminder loop timing, concurrent double-booking under load.",
+  "rca_of_the_issue": "Only one code defect required a fix: POST /api/availability (legacy) returned the same dict instance passed to motor's insert_one, which mutates it with an ObjectId _id; FastAPI's jsonable_encoder then raised \"'ObjectId' object is not iterable\", producing HTTP 500 on every successful call while the row was still persisted. Fixed by returning public(item) (strips _id). The probe additionally exposed that the same handler spreads **body.model_dump() after the computed doctor_id, so the persisted doctor_id is null for doctor callers, and that it validates nothing — both left for the developer agent as they are business-logic changes. The new-feature paths (weekly PUT validation, exception blocking, needs_rescheduling flow, patient uploads) behaved correctly in every scenario tested."
+}
