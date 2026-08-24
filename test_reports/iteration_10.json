@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 10 — auth-focused regression of the Email & Password Login integration (register/login/me, forgot+reset password, brute-force lockout, Mongo indexes) plus the /login, /forgot-password and /reset-password UIs. 16/16 pytest cases passed and all 7 Playwright UI checks passed. All test users/tokens were deleted and demo credentials (CareFlow123!) verified intact for patient/doctor1/admin/doctor2/patient1 after the run.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/login (lockout)", "issue": "login_attempts counter is never reset when the 15-min window lapses (only a successful login deletes it). After the window expires the doc still has count>=5, so the very NEXT single wrong password sets last=now and immediately re-triggers 429 — effectively 1 failed attempt instead of 5 for returning users."},
+      {"endpoint": "CORS middleware", "issue": "allow_origin_regex='.*' with allow_credentials=True reflects any origin for cookie-bearing requests. Playbook expects explicit origins from CORS_ORIGINS (env is set to '*' and unused)."},
+      {"endpoint": "/api/auth/register, /api/auth/reset-password", "issue": "Password 'strength' validation is length-only (>=8); no complexity/common-password check despite the feature description."},
+      {"endpoint": "/api/auth/reset-password", "issue": "Existing session cookies/JWTs are not invalidated after a password reset — an attacker session survives the reset (JWT is stateless, 7-day exp)."},
+      {"endpoint": "/api/auth/forgot-password", "issue": "No rate limiting; a caller can create unlimited reset tokens/notifications for a known email (notification spam vector)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration10_auth.py",
+    "/app/backend/tests/iteration10_ui_setup.py",
+    "/app/backend/tests/iteration10_cleanup.py",
+    "/app/test_reports/pytest/iteration_10_results.xml"
+  ],
+  "action_items": [
+    "Reset/expire the login_attempts counter once the 15-minute window lapses (or use a TTL index / window-based recount) so returning users get a fresh 5 attempts.",
+    "Tighten CORS: build allow_origins from CORS_ORIGINS instead of allow_origin_regex='.*' when allow_credentials=True.",
+    "Optional hardening: invalidate/rotate sessions on password reset and rate-limit /api/auth/forgot-password."
+  ],
+  "critical_code_review_comments": [
+    "server.py _brute_check: the doc is left with count>=LOCKOUT_MAX after the window passes; add `if (now()-last) > window: reset count to 0` inside _brute_bump.",
+    "Model inconsistency is fine (EmailStr on Login/Register/Forgot) but note EmailStr rejects reserved TLDs (.test), so test fixtures must use routable-looking domains.",
+    "server.py is a single large file (~500+ dense lines with multi-statement lines); consider splitting auth into its own router module for maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration10_auth.py",
+    "/app/backend/tests/iteration10_ui_setup.py",
+    "/app/backend/tests/iteration10_cleanup.py"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% (7/7 checks)"},
+  "seed_data_creation": "Created throwaway accounts test_reg_*/test_reset_*/test_lock_*/test_ui_*@careflow.demo for register, reset and lockout flows; ALL deleted afterwards along with their notifications and reset tokens (verified 0 remaining). The reset token + auth notification generated for patient@careflow.demo during the UI forgot-password test were also deleted. No demo password was changed.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md — all demo accounts CareFlow123!, re-verified 200 after the run",
+  "context_for_next_testing_agent": "Auth verified end-to-end in iteration 10: health 200; patient/doctor/admin login sets httpOnly session_token cookie and /auth/me returns the DB role; bcrypt hashes are $2b$; register rejects <8 chars (400 'at least 8 characters') and duplicates (409); forgot-password returns {ok:true} for unknown emails without creating a token; known email creates a password_reset_tokens row and an in-app notification with kind='auth' containing '/reset-password?token=...'; reset-password returns 400 for invalid token, 400 'Reset link has expired' for a back-dated expires_at, 400 for <8 chars, 200 for valid, and 400 on reuse (used=True); lockout gives 401 x5 then 429 on the 6th (use requests.Session + stable X-Forwarded-For header, e.g. 203.0.113.5); indexes users.email_1 unique, password_reset_tokens expires_at TTL + token_1 unique, login_attempts identifier_1 unique all present. UI: forgot-password-link -> /forgot-password, forgot-message shown, reset-missing-token warning without token, mismatch + short-password errors via reset-message, successful reset redirects to /login and the new password logs in, wrong password shows authentication-error. Only known gap: lockout counter not reset after the window lapses.",
+  "rca_of_the_issue": "No functional defect found. The only behavioural risk is in _brute_bump/_brute_check: the login_attempts document is deleted only on a successful login, so after the 15-minute window passes the stale count (>=5) remains and the next single failure re-locks the identifier immediately."
+}

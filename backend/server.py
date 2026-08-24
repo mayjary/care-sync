@@ -8,7 +8,7 @@ from passlib.context import CryptContext
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
 from typing import Optional
-import os, uuid, jwt, logging, hashlib, mimetypes, requests, asyncio, re
+import os, uuid, jwt, logging, hashlib, mimetypes, requests, asyncio, re, secrets
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -92,10 +92,12 @@ def now(): return datetime.now(timezone.utc)
 def public(doc):
     if not doc: return None
     doc = dict(doc); doc.pop("_id", None); doc.pop("password_hash", None); return doc
-def token_for(user): return jwt.encode({"sub": user["user_id"], "exp": now() + timedelta(days=7)}, SECRET, algorithm="HS256")
+def token_for(user): return jwt.encode({"sub": user["user_id"], "iat": int(now().timestamp()), "exp": now() + timedelta(days=7)}, SECRET, algorithm="HS256")
 
 class Login(BaseModel): email: EmailStr; password: str
 class Register(BaseModel): name: str; email: EmailStr; password: str; role: str = "patient"
+class Forgot(BaseModel): email: EmailStr
+class Reset(BaseModel): token: str; password: str
 class AppointmentCreate(BaseModel): doctor_id: str; appointment_date: str; appointment_time: str
 class AvailabilityCreate(BaseModel): doctor_id: Optional[str] = None; weekday: int = Field(ge=0, le=6); start_time: str; end_time: str; duration: int = 30
 class Period(BaseModel): start_time: str; end_time: str
@@ -114,6 +116,12 @@ async def current_user(request: Request):
     except jwt.PyJWTError: raise HTTPException(401, "Session expired")
     user = await db.users.find_one({"user_id": payload["sub"]}, {"_id": 0})
     if not user: raise HTTPException(401, "User not found")
+    pca = user.get("password_changed_at")
+    if pca:
+        try:
+            pca_ts = int(datetime.fromisoformat(pca).timestamp())
+            if payload.get("iat", 0) < pca_ts: raise HTTPException(401, "Session invalidated. Please sign in again.")
+        except (ValueError, TypeError): pass
     return user
 def roles(*allowed):
     async def check(user=Depends(current_user)):
@@ -128,24 +136,84 @@ async def health():
     await db.command("ping")
     return {"status": "healthy", "database": "healthy", "storage": "emergent" if storage_available() else "local", "notifications": "active"}
 
+LOCKOUT_MAX = 5
+LOCKOUT_WINDOW_SEC = 15 * 60
+
+def _identifier(request: Request, email: str) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    ip = xff.split(",")[0].strip() if xff else (request.client.host if request.client else "unknown")
+    return f"{ip}:{email.lower()}"
+
+async def _brute_check(ident: str):
+    doc = await db.login_attempts.find_one({"identifier": ident}, {"_id": 0})
+    if not doc: return
+    if doc.get("count", 0) < LOCKOUT_MAX: return
+    last = doc.get("last")
+    if isinstance(last, str): last = datetime.fromisoformat(last)
+    if last and last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
+    if last and (now() - last).total_seconds() < LOCKOUT_WINDOW_SEC:
+        raise HTTPException(429, "Too many failed sign-in attempts. Please wait a few minutes and try again.")
+
+async def _brute_bump(ident: str, success: bool):
+    if success:
+        await db.login_attempts.delete_one({"identifier": ident})
+        return
+    doc = await db.login_attempts.find_one({"identifier": ident}, {"_id": 0})
+    last = doc.get("last") if doc else None
+    if isinstance(last, str): last = datetime.fromisoformat(last)
+    if last and last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
+    if last and (now() - last).total_seconds() >= LOCKOUT_WINDOW_SEC:
+        await db.login_attempts.update_one({"identifier": ident}, {"$set": {"last": now().isoformat(), "count": 1}}, upsert=True)
+    else:
+        await db.login_attempts.update_one({"identifier": ident}, {"$set": {"last": now().isoformat()}, "$inc": {"count": 1}}, upsert=True)
+
 @api.post("/auth/register")
 async def register(body: Register, response: Response):
     if body.role not in ["patient", "doctor"]: body.role = "patient"
+    if len(body.password) < 8: raise HTTPException(400, "Password must be at least 8 characters")
     if await db.users.find_one({"email": body.email.lower()}): raise HTTPException(409, "An account with this email already exists")
     uid = "user_" + uuid.uuid4().hex[:12]
     user = {"user_id": uid, "name": body.name, "email": body.email.lower(), "role": body.role, "password_hash": pwd.hash(body.password), "created_at": now().isoformat()}
     await db.users.insert_one(user); response.set_cookie("session_token", token_for(user), httponly=True, secure=True, samesite="none", max_age=604800, path="/")
     return public(user)
 @api.post("/auth/login")
-async def login(body: Login, response: Response):
+async def login(body: Login, request: Request, response: Response):
+    ident = _identifier(request, body.email)
+    await _brute_check(ident)
     user = await db.users.find_one({"email": body.email.lower()})
-    if not user or not pwd.verify(body.password, user.get("password_hash", "")): raise HTTPException(401, "Email or password is incorrect")
+    if not user or not pwd.verify(body.password, user.get("password_hash", "")):
+        await _brute_bump(ident, False)
+        raise HTTPException(401, "Email or password is incorrect")
+    await _brute_bump(ident, True)
     response.set_cookie("session_token", token_for(user), httponly=True, secure=True, samesite="none", max_age=604800, path="/")
     return public(user)
 @api.get("/auth/me")
 async def me(user=Depends(current_user)): return public(user)
 @api.post("/auth/logout")
 async def logout(response: Response): response.delete_cookie("session_token", path="/"); return {"ok": True}
+@api.post("/auth/forgot-password")
+async def forgot_password(body: Forgot):
+    user = await db.users.find_one({"email": body.email.lower()}, {"_id": 0})
+    if user:
+        raw = secrets.token_urlsafe(32)
+        expires_at = now() + timedelta(hours=1)
+        await db.password_reset_tokens.insert_one({"token": raw, "user_id": user["user_id"], "expires_at": expires_at, "used": False, "created_at": now().isoformat()})
+        logger.info("Password reset link (email delivery not configured): /reset-password?token=%s", raw)
+        try: await notify(user["user_id"], "Password reset requested", f"Use this link to reset your password: /reset-password?token={raw}", "auth")
+        except Exception: pass
+    return {"ok": True}
+@api.post("/auth/reset-password")
+async def reset_password(body: Reset):
+    rec = await db.password_reset_tokens.find_one({"token": body.token, "used": False}, {"_id": 0})
+    if not rec: raise HTTPException(400, "Invalid or expired reset link")
+    exp = rec.get("expires_at")
+    if isinstance(exp, str): exp = datetime.fromisoformat(exp)
+    if exp and exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
+    if not exp or exp < now(): raise HTTPException(400, "Reset link has expired")
+    if len(body.password) < 8: raise HTTPException(400, "Password must be at least 8 characters")
+    await db.users.update_one({"user_id": rec["user_id"]}, {"$set": {"password_hash": pwd.hash(body.password), "password_changed_at": now().isoformat()}})
+    await db.password_reset_tokens.update_one({"token": body.token}, {"$set": {"used": True, "used_at": now().isoformat()}})
+    return {"ok": True}
 @api.post("/auth/google")
 async def google_auth(session_id: str, response: Response):
     try:
@@ -403,6 +471,10 @@ async def seed():
 @app.on_event("startup")
 async def startup():
     global reminder_task
+    await db.users.create_index("email", unique=True)
+    await db.login_attempts.create_index("identifier", unique=True)
+    await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.password_reset_tokens.create_index("token", unique=True)
     await db.slot_locks.create_index([("doctor_id", 1), ("appointment_date", 1), ("appointment_time", 1)], unique=True)
     await db.reminders.create_index([("appointment_id", 1), ("lead_hours", 1)], unique=True)
     await seed()

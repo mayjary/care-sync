@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 11 targeted backend retest of the two iteration-10 defects. (a) Brute-force lockout counter now resets after the 15-min window: with a seeded login_attempts row (count=5, last=20 min ago) for identifier 203.0.113.9:lockreset+iter11@careflow.demo, the FIRST wrong login returned 401 (not 429) and the row recounted to count==1; the next 4 wrong attempts returned 401 (count 2..5) and the 6th within the fresh window returned 429 ('Too many failed sign-in attempts...'); a correct password while locked is also 429 (check precedes verify, expected); after aging the row again, a successful login returned 200 and the login_attempts record was deleted. (b) Session invalidation on password reset verified end-to-end: login -> /api/auth/me 200 -> forgot-password -> token parsed from in-app notification (kind='auth') -> reset-password 200 (password_changed_at stamped) -> OLD cookie on /api/auth/me returns 401 with detail exactly 'Session invalidated. Please sign in again.'; old password now 401; login with new password 200 and its new cookie works on /api/auth/me; reused reset token returns 400. Regression sanity: /api/health healthy (db healthy), patient/doctor1/admin @careflow.demo all log in with CareFlow123! and /api/auth/me returns the correct role. Full file run 4x: 6/6 passed each time after fixing a test-harness race. All test data cleaned up; no demo password was changed (verified patient1/patient2/doctor2/patient8 still log in with CareFlow123! and have no password_changed_at).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration11_auth_fixes.py",
+    "/app/test_reports/pytest/iteration11_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Informational: _brute_check runs before credential verification, so a locked-out identifier gets 429 even with the correct password until the window lapses. This is intentional lockout behaviour but means a legitimate user cannot self-recover before 15 minutes - consider clearing the record on successful reset-password if UX complaints arise.",
+    "Informational: token_for stores iat with 1-second granularity while password_changed_at is microsecond-precision ISO; a token minted in the same second as a reset (iat == pca_ts) survives because the comparison is strict '<'. Practically harmless (login right after reset must work) but worth knowing.",
+    "Backend log shows passlib's benign 'error reading bcrypt version' AttributeError trap (passlib vs bcrypt 4.x); hashes are correct $2b$ format, no functional impact."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration11_auth_fixes.py"
+  ],
+  "success_rate": {"backend": "100% (6/6 pytest cases)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Temporary: user lockreset+iter11@careflow.demo, user test_sessionreset+iter11@careflow.demo, one seeded login_attempts row for 203.0.113.9. All deleted. Additionally cleaned leftover iteration-10 artifacts: 6 stale password_reset_tokens + 6 auth notifications for demo_patient_0/demo_patient_1 and 1 stale login_attempts row for a test_ui_* identifier. No demo passwords modified.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both iteration-10 auth defects are fixed and covered by /app/backend/tests/test_iteration11_auth_fixes.py (regression sanity + lockout window reset + session invalidation). IMPORTANT harness note: pytest.ini runs xdist with loadscope; a module-scoped autouse cleanup that regex-deletes login_attempts races with the other worker and wipes the lockout row mid-test (this produced a false 401-instead-of-429 failure). Keep cleanup class-scoped and identifier-exact. Use pymongo (MONGO_URL/DB_NAME from /app/backend/.env) to age login_attempts rows instead of sleeping 15 minutes, and always send a fixed X-Forwarded-For since _identifier derives from the first XFF hop. Frontend was not tested in this iteration.",
+  "rca_of_the_issue": "Initial full-file run showed the 6th wrong attempt returning 401 instead of 429. RCA: not an application bug - the module-scoped autouse cleanup fixture executes once per xdist worker, and the worker running TestRegressionSanity finished first and deleted login_attempts rows matching the 203.0.113.9 / iter11 regex while the lockout test was still counting, resetting the counter. Replaced with class-scoped, identifier-exact cleanup; the suite then passed 6/6 on 4 consecutive runs."
+}
