@@ -26,6 +26,65 @@ UPLOAD_DIR = ROOT_DIR / "private_uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 SECRET = _require_env("AUTH_SECRET")
 reminder_task = None
+logger = logging.getLogger("careflow")
+
+APP_NAME = "careflow"
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+_storage_key = None
+def _init_storage(force: bool = False):
+    global _storage_key
+    if _storage_key and not force: return _storage_key
+    if not EMERGENT_KEY: return None
+    r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
+    r.raise_for_status(); _storage_key = r.json()["storage_key"]; return _storage_key
+def storage_available() -> bool:
+    try: return bool(_init_storage())
+    except Exception as e: logger.warning("Emergent storage unavailable: %s", e); return False
+def storage_put(kind: str, owner_id: str, data: bytes, ext: str, content_type: str) -> str:
+    key = _init_storage()
+    if not key: raise RuntimeError("Storage not initialized")
+    path = f"{APP_NAME}/{kind}/{owner_id}/{uuid.uuid4().hex}.{ext or 'bin'}"
+    def _put(k):
+        return requests.put(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": k, "Content-Type": content_type or "application/octet-stream"}, data=data, timeout=120)
+    r = _put(key)
+    if r.status_code in (403, 404):
+        key = _init_storage(force=True); r = _put(key)
+    r.raise_for_status(); return r.json().get("path", path)
+def storage_get(path: str) -> tuple[bytes, str]:
+    key = _init_storage()
+    if not key: raise RuntimeError("Storage not initialized")
+    def _get(k): return requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": k}, timeout=60)
+    r = _get(key)
+    if r.status_code in (403, 404):
+        key = _init_storage(force=True); r = _get(key)
+    r.raise_for_status(); return r.content, r.headers.get("Content-Type", "application/octet-stream")
+
+def _ext_for(filename: str, content_type: str) -> str:
+    if filename and "." in filename: return filename.rsplit(".", 1)[-1].lower()
+    return {"application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png"}.get(content_type, "bin")
+
+async def save_upload(kind: str, owner_id: str, data: bytes, filename: str, content_type: str) -> dict:
+    ext = _ext_for(filename, content_type)
+    if storage_available():
+        path = storage_put(kind, owner_id, data, ext, content_type)
+        return {"storage_backend": "emergent", "storage_path": path}
+    fid = "file_" + uuid.uuid4().hex
+    (UPLOAD_DIR / fid).write_bytes(data)
+    return {"storage_backend": "local", "file_id": fid}
+
+async def read_upload(row: dict) -> tuple[bytes | None, Path | None]:
+    if row.get("storage_backend") == "emergent" and row.get("storage_path"):
+        try:
+            data, _ = storage_get(row["storage_path"]); return data, None
+        except Exception as e:
+            logger.warning("storage_get failed for %s: %s", row.get("storage_path"), e); return None, None
+    fid = row.get("file_id")
+    if fid:
+        p = UPLOAD_DIR / fid
+        if p.exists(): return None, p
+    return None, None
 
 app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -66,7 +125,8 @@ def roles(*allowed):
 async def root(): return {"message": "CareFlow is ready"}
 @api.get("/health")
 async def health():
-    await db.command("ping"); return {"status": "healthy", "database": "healthy", "storage": "healthy", "notifications": "active"}
+    await db.command("ping")
+    return {"status": "healthy", "database": "healthy", "storage": "emergent" if storage_available() else "local", "notifications": "active"}
 
 @api.post("/auth/register")
 async def register(body: Register, response: Response):
@@ -250,8 +310,9 @@ async def upload_report(patient_id: str=Form(...), title: str=Form(...), report_
     if file.content_type not in ["application/pdf","image/jpeg","image/png"]: raise HTTPException(400,"Only PDF, JPG, and PNG files are accepted")
     data=await file.read()
     if len(data)>10*1024*1024: raise HTTPException(413,"File must be smaller than 10 MB")
-    fid="file_"+uuid.uuid4().hex; path=UPLOAD_DIR/fid; path.write_bytes(data)
-    item={"report_id":"rpt_"+uuid.uuid4().hex[:10],"patient_id":patient_id,"uploaded_by":user["user_id"],"uploaded_by_name":user["name"],"title":title,"report_type":report_type,"visibility":"private","file_id":fid,"file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"created_at":now().isoformat()}; await db.reports.insert_one(item); return public(item)
+    stored=await save_upload("reports", patient_id, data, file.filename, file.content_type)
+    item={"report_id":"rpt_"+uuid.uuid4().hex[:10],"patient_id":patient_id,"uploaded_by":user["user_id"],"uploaded_by_name":user["name"],"title":title,"report_type":report_type,"visibility":"private","file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"created_at":now().isoformat(), **stored}
+    await db.reports.insert_one(item); return public(item)
 @api.get("/reports")
 async def reports(user=Depends(current_user)):
     q={"patient_id":user["user_id"],"visibility":{"$in":["patient_visible","public"]}} if user["role"]=="patient" else ({"uploaded_by":user["user_id"]} if user["role"]=="doctor" else {})
@@ -273,8 +334,9 @@ async def upload_patient_document(title: str=Form(...), file: UploadFile=File(..
     if file.content_type not in ["application/pdf","image/jpeg","image/png"]: raise HTTPException(400,"Only PDF, JPG, and PNG files are accepted")
     data=await file.read()
     if len(data)>10*1024*1024: raise HTTPException(413,"File must be smaller than 10 MB")
-    fid="file_"+uuid.uuid4().hex; (UPLOAD_DIR/fid).write_bytes(data)
-    item={"document_id":"doc_"+uuid.uuid4().hex[:10],"patient_id":user["user_id"],"patient_name":user["name"],"title":title,"file_id":fid,"file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"status":"pending_review","created_at":now().isoformat()}; await db.patient_documents.insert_one(item)
+    stored=await save_upload("patient-documents", user["user_id"], data, file.filename, file.content_type)
+    item={"document_id":"doc_"+uuid.uuid4().hex[:10],"patient_id":user["user_id"],"patient_name":user["name"],"title":title,"file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"status":"pending_review","created_at":now().isoformat(), **stored}
+    await db.patient_documents.insert_one(item)
     async for a in db.users.find({"role":"admin"},{"user_id":1}): await notify(a["user_id"],"Patient document awaiting review",f"{user['name']} submitted a document for review.","review")
     return public(item)
 @api.patch("/patient-documents/{document_id}")
@@ -289,18 +351,20 @@ async def report_file(report_id: str, user=Depends(current_user)):
     if not r: raise HTTPException(404,"This report is no longer available")
     if user["role"]=="patient" and (r["patient_id"]!=user["user_id"] or r["visibility"] not in ["patient_visible","public"]): raise HTTPException(404,"This report is no longer available")
     if user["role"]=="doctor" and r.get("uploaded_by")!=user["user_id"]: raise HTTPException(403,"You are not authorized to access this report")
-    path=UPLOAD_DIR/r["file_id"]
-    if not path.exists(): raise HTTPException(404,"This report is no longer available")
-    return FileResponse(path, media_type=r["content_type"], filename=r["file_name"])
+    data, path = await read_upload(r)
+    if data is not None: return Response(content=data, media_type=r["content_type"], headers={"Content-Disposition": f'inline; filename="{r["file_name"]}"'})
+    if path is not None: return FileResponse(path, media_type=r["content_type"], filename=r["file_name"])
+    raise HTTPException(404,"This report is no longer available")
 @api.get("/patient-documents/{document_id}/file")
 async def patient_document_file(document_id: str, user=Depends(current_user)):
     doc = await db.patient_documents.find_one({"document_id": document_id}, {"_id": 0})
     if not doc: raise HTTPException(404, "Document is not available")
     if user["role"] == "patient" and doc["patient_id"] != user["user_id"]: raise HTTPException(404, "Document is not available")
     if user["role"] == "doctor": raise HTTPException(403, "You are not authorized to access this document")
-    path = UPLOAD_DIR / doc["file_id"]
-    if not path.exists(): raise HTTPException(404, "Document is not available")
-    return FileResponse(path, media_type=doc["content_type"], filename=doc["file_name"])
+    data, path = await read_upload(doc)
+    if data is not None: return Response(content=data, media_type=doc["content_type"], headers={"Content-Disposition": f'inline; filename="{doc["file_name"]}"'})
+    if path is not None: return FileResponse(path, media_type=doc["content_type"], filename=doc["file_name"])
+    raise HTTPException(404, "Document is not available")
 @api.get("/dashboard")
 async def dashboard(user=Depends(current_user)):
     q={"patient_id":user["user_id"]} if user["role"]=="patient" else ({"doctor_id":user["user_id"]} if user["role"]=="doctor" else {})
@@ -342,6 +406,11 @@ async def startup():
     await db.slot_locks.create_index([("doctor_id", 1), ("appointment_date", 1), ("appointment_time", 1)], unique=True)
     await db.reminders.create_index([("appointment_id", 1), ("lead_hours", 1)], unique=True)
     await seed()
+    try:
+        if _init_storage(): logger.info("Emergent object storage initialized")
+        else: logger.warning("EMERGENT_LLM_KEY not configured; uploads will use local private_uploads/")
+    except Exception as e:
+        logger.warning("Emergent storage init failed at startup: %s", e)
     reminder_task=asyncio.create_task(reminder_loop())
 @app.on_event("shutdown")
 async def shutdown():

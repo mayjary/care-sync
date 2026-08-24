@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 9 — targeted backend regression of the Emergent File & Media Storage integration only (iterations 5/6/7 suites intentionally NOT rerun). New test file /app/backend/tests/test_iteration9_storage.py: 13 pytest tests, 13 PASSED (100%). Verified: (1) GET /api/health returns status/database healthy and storage='emergent'; (2) sanity logins for patient@/doctor1@/admin@careflow.demo + /api/auth/me; (3) POST /api/reports/upload as admin with a PDF returns storage_backend='emergent', storage_path 'careflow/reports/{patient_id}/{uuid}.pdf', NO file_id and no _id, file_size correct, visibility='private'; GET /api/reports/{id}/file returns 200 byte-identical bytes with Content-Type application/pdf; (4) PNG upload -> path ends .png and download returns byte-exact PNG with Content-Type image/png; (5) PATCH /api/reports/{id}/visibility -> 'patient_visible': target patient 200 byte-exact (and 404 before release), other patient (patient1@) 404, non-uploader doctor2@ 403, unauthenticated 401; (6) POST /api/patient-documents/upload as patient -> storage_backend='emergent', path 'careflow/patient-documents/{user_id}/...', status='pending_review'; GET /api/patient-documents/{id}/file: owner 200 byte-exact, other patient 404, doctor 403, admin 200 byte-exact; (7) legacy rows with file_id and no storage_path still stream 200 from private_uploads for the authorized admin (3 legacy reports checked); (8) two concurrent uploads produced two distinct storage_paths with byte-exact independent contents (no collision); (9) rejection paths intact — text/plain -> 400 on both upload endpoints, >10MB PDF -> 413. All Mongo rows created by this run (5 reports + 1 patient document) were deleted; verified 0 iter9 rows remain. No product code changed; backend logs show only the pre-existing benign passlib/bcrypt __about__ warning.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "read_upload() / GET /api/reports/{id}/file", "issue": "If storage_get() raises (Emergent storage outage, expired storage key beyond the single retry), the exception is swallowed and the endpoint returns 404 'no longer available'. A real backend/storage failure is indistinguishable from a deleted record — prefer 502/503 for transport failures so it is observable."},
+      {"endpoint": "_init_storage/storage_put/storage_get", "issue": "Synchronous `requests` calls executed inside async request handlers (including /api/health via storage_available()) block the event loop for the whole upload/download (timeouts 120s/60s). Under concurrency this serialises the server; consider httpx.AsyncClient or run_in_threadpool."},
+      {"endpoint": "POST /api/reports/upload, POST /api/patient-documents/upload", "issue": "The whole body is read into memory (await file.read()) before the 10 MB check, so the 413 path still buffers arbitrarily large payloads. Use Content-Length pre-check or chunked read with early abort."},
+      {"endpoint": "db.patient_documents", "issue": "22 leftover TEST_/UITEST rows from iterations 5–7 still pollute the collection (plus orphaned blobs in backend/private_uploads). Pre-existing, not caused by this iteration; my own rows were removed."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration9_storage.py",
+    "/app/test_reports/pytest/iteration_9_results.xml"
+  ],
+  "action_items": [
+    "Optional: distinguish storage transport failures (502/503) from missing records (404) in read_upload().",
+    "Optional: make Emergent storage calls non-blocking (async client or threadpool), and avoid calling storage_available() on every /api/health hit.",
+    "Optional housekeeping: purge the 22 leftover TEST_/UITEST patient_documents rows and orphaned private_uploads blobs."
+  ],
+  "critical_code_review_comments": [
+    "save_upload correctly returns storage_backend+storage_path for Emergent and storage_backend+file_id for local, so legacy rows (file_id, no storage_backend) fall through to the disk branch — verified working for existing rows.",
+    "storage_put re-inits the storage key on 403/404 and retries once — good resilience for expired keys.",
+    "Blocking `requests` usage inside async endpoints is the main architectural concern of this integration.",
+    "server.py is now 420 dense lines with multi-statement one-liners; splitting routers (auth/reports/storage) would improve maintainability."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration9_storage.py", "/app/test_reports/iteration_9.json"],
+  "success_rate": {"backend": "100% (13/13)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "5 temporary reports (TEST_iter9_*) and 1 patient document (TEST_iter9_doc) uploaded to Emergent storage; all Mongo rows deleted after the run (storage objects remain, no delete API).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "patient@careflow.demo, patient1@careflow.demo, doctor1@careflow.demo, doctor2@careflow.demo, admin@careflow.demo — password CareFlow123!",
+  "context_for_next_testing_agent": "Emergent storage integration is verified end-to-end (upload -> emergent path, byte-exact download, correct content-type, access-control matrix, legacy file_id fallback, concurrency, 400/413 rejections). Reusable suite: /app/backend/tests/test_iteration9_storage.py (run with -n 0 -p no:randomly so the cleanup test runs last). Local-fallback branch (no EMERGENT_LLM_KEY) was NOT exercised in the preview env — legacy file_id rows cover the disk read path only.",
+  "rca_of_the_issue": "No regression found. Health reports storage='emergent'; new rows carry storage_path only; legacy rows continue to be served from private_uploads via the file_id branch of read_upload()."
+}
