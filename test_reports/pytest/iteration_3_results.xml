@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="9" time="5.572" timestamp="2026-08-24T13:19:33.169279+00:00" hostname="agent-env-06c79772-811b-4f49-a4d0-d712d04de531"><testcase classname="tests.test_iteration2_focus" name="test_admin_targets_selected_doctor_and_report_permissions" time="1.999" /><testcase classname="tests.backend_test" name="test_seeded_roles_and_me" time="1.951" /><testcase classname="tests.backend_test" name="test_invalid_password_and_protected_route" time="0.678" /><testcase classname="tests.test_iteration2_focus" name="test_concurrent_same_slot_is_single_success" time="1.346"><failure message="AssertionError: assert [409, 409] == [200, 409]&#10;  &#10;  At index 0 diff: 409 != 200&#10;  &#10;  Full diff:&#10;    [&#10;  -     200,&#10;  ?     ^ ^...&#10;  &#10;  ...Full output truncated (4 lines hidden), use '-vv' to show">backend/tests/test_iteration2_focus.py:45: in test_concurrent_same_slot_is_single_success
+    assert sorted(r.status_code for r in responses) == [200, 409]
+E   AssertionError: assert [409, 409] == [200, 409]
+E     
+E     At index 0 diff: 409 != 200
+E     
+E     Full diff:
+E       [
+E     -     200,
+E     ?     ^ ^...
+E     
+E     ...Full output truncated (4 lines hidden), use '-vv' to show</failure></testcase><testcase classname="tests.backend_test" name="test_logout_invalidates_cookie" time="0.700" /><testcase classname="tests.backend_test" name="test_doctors_and_slots" time="0.427" /><testcase classname="tests.test_iteration3_reminders" name="test_booking_creates_two_unique_reminders_and_rebooking_after_cancel" time="1.033" /><testcase classname="tests.backend_test" name="test_role_permissions_and_patient_views" time="0.756" /><testcase classname="tests.backend_test" name="test_legal_and_health" time="0.452" /></testsuite></testsuites>

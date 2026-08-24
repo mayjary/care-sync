@@ -1,0 +1,46 @@
+{
+  "app_name": "CareFlow",
+  "archetype": "ORGANIC & EARTHY / CLINICAL CALM (Archetype 1 + SaaS)",
+  "typography": {
+    "heading_font": "Plus Jakarta Sans, sans-serif",
+    "body_font": "Inter, sans-serif",
+    "mono_font": "JetBrains Mono, monospace"
+  },
+  "colors": {
+    "primary": "#0D9488",
+    "primary_foreground": "#FFFFFF",
+    "secondary": "#F0FDFA",
+    "accent": "#0F766E",
+    "neutral_dark": "#1E293B",
+    "neutral_light": "#F8FAFC",
+    "background": "#F6F8FA",
+    "card_bg": "#FFFFFF",
+    "border": "#E2E8F0"
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-xl bg-white/80 border border-slate-200/80 shadow-sm",
+    "shadows": "shadow-[0_4px_20px_-2px_rgba(13,148,136,0.08)]",
+    "radius": "rounded-xl"
+  },
+  "component_path": "/app/frontend/src/components",
+  "image_urls": {
+    "doctor_1": "https://images.unsplash.com/photo-1622253692010-333f2da6031d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBkb2N0b3IlMjBwb3J0cmFpdCUyMGNsaW5pY3xlbnwwfHx8fDE3ODc1NzY3OTR8MA&ixlib=rb-4.1.0&q=85",
+    "doctor_2": "https://images.unsplash.com/photo-1612349317150-e413f6a5b16d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBkb2N0b3IlMjBwb3J0cmFpdCUyMGNsaW5pY3xlbnwwfHx8fDE3ODc1NzY3OTR8MA&ixlib=rb-4.1.0&q=85",
+    "doctor_3": "https://images.unsplash.com/photo-1712215544003-af10130f8eb3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBkb2N0b3IlMjBwb3J0cmFpdCUyMGNsaW5pY3xlbnwwfHx8fDE3ODc1NzY3OTR8MA&ixlib=rb-4.1.0&q=85",
+    "clinic_interior": "https://images.unsplash.com/photo-1519494026892-80bbd2d6fd0d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA0MTJ8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBob3NwaXtaYWwlMjBpbnRlcmlvciUyMG1lZGljYWwlMjB0ZWNobm9sb2d5fGVufDB8fHx8MTc4NzU3Njc5NHww&ixlib=rb-4.1.0&q=85",
+    "mri_room": "https://images.pexels.com/photos/13176356/pexels-photo-13176356.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+  },
+  "instructions_to_main_agent": [
+    "Ensure all interactive elements and key informational blocks have data-testid attributes.",
+    "Implement full end-to-end CareFlow platform with FastAPI backend, MongoDB, JWT auth, role dashboards, doctor availability, appointment booking with double-booking prevention, notifications & 24h/1h reminders scheduler, patient timeline & records, private authenticated secure report upload/view/download, and legal pages.",
+    "Do not use transparent header backgrounds without blur or solid contrast.",
+    "Ensure hover states have explicit text color contrast.",
+    "Use generous padding, clinical calm teal/slate color palette, and polished modern UI."
+  ],
+  "universal_guidelines": [
+    "No universal transitions like transition: all.",
+    "Never center app container.",
+    "Use modern pill-shaped or rounded-xl buttons with interaction animations.",
+    "Every interaction needs micro-animations and hover states."
+  ]
+}
