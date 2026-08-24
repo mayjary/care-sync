@@ -23,6 +23,8 @@ Build CareFlow, a production-oriented healthcare coordination platform connectin
 - Added seeded fictional clinic, five doctors, eight patients, demo patient/doctor/admin accounts, JWT auth, Google callback, logout, health check, and protected APIs.
 - Added availability-generated slots, atomic slot locks, cancellation handling, patient-visible report permissions, private upload/download streaming, audit-ready record model, and reminder scheduler.
 - Verified with lint, production build, external API checks, responsive screenshot, and iteration-2 end-to-end QA.
+- Added the patient booking journey from the doctor directory: 14-day date calendar, live availability requests, selectable times, confirmation messaging, and backend appointment creation.
+- Verified the booking journey through browser QA on desktop and mobile, including dialog close, live slot selection, confirmation, and no horizontal overflow.
 
 ## Prioritized backlog
 ### P0

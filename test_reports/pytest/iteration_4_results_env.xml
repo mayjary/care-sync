@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="3" time="2.941" timestamp="2026-08-24T13:27:25.511949+00:00" hostname="agent-env-06c79772-811b-4f49-a4d0-d712d04de531"><testcase classname="tests.test_iteration2_focus" name="test_admin_targets_selected_doctor_and_report_permissions" time="1.371" /><testcase classname="tests.test_iteration3_reminders" name="test_booking_creates_two_unique_reminders_and_rebooking_after_cancel" time="0.807"><failure message="AssertionError: {&quot;detail&quot;:&quot;That appointment slot was just taken. Please choose another time.&quot;}&#10;assert 409 == 200&#10; +  where 409 = &lt;Response [409]&gt;.status_code">backend/tests/test_iteration3_reminders.py:26: in test_booking_creates_two_unique_reminders_and_rebooking_after_cancel
+    assert booked.status_code == 200, booked.text
+E   AssertionError: {"detail":"That appointment slot was just taken. Please choose another time."}
+E   assert 409 == 200
+E    +  where 409 = &lt;Response [409]&gt;.status_code</failure></testcase><testcase classname="tests.test_iteration2_focus" name="test_concurrent_same_slot_is_single_success" time="0.935"><failure message="AssertionError: assert [409, 409] == [200, 409]&#10;  &#10;  At index 0 diff: 409 != 200&#10;  &#10;  Full diff:&#10;    [&#10;  -     200,&#10;  ?     ^ ^...&#10;  &#10;  ...Full output truncated (4 lines hidden), use '-vv' to show">backend/tests/test_iteration2_focus.py:45: in test_concurrent_same_slot_is_single_success
+    assert sorted(r.status_code for r in responses) == [200, 409]
+E   AssertionError: assert [409, 409] == [200, 409]
+E     
+E     At index 0 diff: 409 != 200
+E     
+E     Full diff:
+E       [
+E     -     200,
+E     ?     ^ ^...
+E     
+E     ...Full output truncated (4 lines hidden), use '-vv' to show</failure></testcase></testsuite></testsuites>
