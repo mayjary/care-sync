@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 8 — targeted infra/config smoke only (9 assertions requested). Created /app/backend/tests/test_iteration8_infra_smoke.py: 7 pytest tests, all PASSED. Verified (1) GET /api/health 200 status=healthy/database=healthy; (2)(3)(4) logins for patient@, doctor1@, admin@careflow.demo return 200, set httponly session_token cookie, and GET /api/auth/me returns the correct email/role via cookie (no password_hash/_id leakage); (5) GET /api/reports as admin returns 200 list; (6) admin multipart upload POST /api/reports/upload (minimal PDF) returns 200 and GET /api/reports/{id}/file returns 200 with byte-identical content and application/pdf; (7) unauthorized access — patient with no released report gets 404, non-uploader doctor2 gets 403, unauthenticated gets 401; (8) headless browser fetch of REACT_APP_BACKEND_URL/api/health from the frontend origin returned 200 healthy (landing page renders fine); (9) backend imports/starts cleanly with the _require_env helper (supervisor logs show 'Application startup complete', no import errors). Additionally reproduced the original bug scenario: running server.py with MONGO_URL/DB_NAME/AUTH_SECRET unset now raises RuntimeError with the actionable 'Copy backend/.env.example to backend/.env...' message instead of KeyError — fix confirmed. Test upload row + file were deleted after the run (verified 0 TEST_ reports remain). No broad regression run, no product code changed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "backend/.env.example", "issue": "Documents an optional CORS_ORIGINS variable that server.py never reads (CORS uses allow_origin_regex='.*'). Either implement it or drop the comment to avoid misleading local users."},
+      {"endpoint": "/app/backend/private_uploads", "issue": "62 files on disk vs 8 report + document rows in Mongo — orphaned upload blobs accumulated from earlier iterations (no storage cleanup path). Pre-existing, not caused by this iteration; my test file was removed."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_infra_smoke.py",
+    "/app/test_reports/pytest/iteration_8_results.xml"
+  ],
+  "action_items": [
+    "Optional: remove or implement the CORS_ORIGINS hint in backend/.env.example.",
+    "Optional housekeeping: prune orphaned blobs in backend/private_uploads that have no matching reports/patient_documents row."
+  ],
+  "critical_code_review_comments": [
+    "_require_env correctly treats empty-string values as missing and is evaluated at import time, so misconfiguration fails fast with a clear message — good.",
+    "AUTH_SECRET is now required at import; make sure any deploy pipeline that previously relied on a default sets it, otherwise startup will fail (intended fail-fast behaviour).",
+    "server.py is ~350 dense one-liner lines; consider splitting routers (auth/availability/reports) for maintainability — not part of this infra fix."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration8_infra_smoke.py", "/app/test_reports/iteration_8.json"],
+  "success_rate": {"backend": "100%", "frontend": "100% (single connectivity check only)"},
+  "seed_data_creation": "One temporary private report (title TEST_iter8_smoke, patient demo_patient_0) uploaded and then deleted along with its blob; verified 0 TEST_ reports remain.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "patient@careflow.demo / doctor1@careflow.demo / doctor2@careflow.demo / admin@careflow.demo, password CareFlow123!",
+  "context_for_next_testing_agent": "Iteration 8 was an infra-only smoke pass (env helper + .env.example templates). Full functional suites from iterations 5/6/7 were intentionally NOT run. New reusable smoke file: /app/backend/tests/test_iteration8_infra_smoke.py (run with -n 0 so its cleanup test executes last). Report access-control matrix confirmed: admin/uploader 200, other doctor 403, unrelated/unreleased patient 404, anonymous 401.",
+  "rca_of_the_issue": "Original KeyError: 'MONGO_URL' came from os.environ[...] direct subscript when a locally exported copy had no backend/.env. The _require_env helper now raises RuntimeError with remediation guidance; reproduced with the env vars stripped and confirmed the new message. No behaviour change in the preview environment (all endpoints tested still behave identically)."
+}

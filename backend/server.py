@@ -12,14 +12,19 @@ import os, uuid, jwt, logging, hashlib, mimetypes, requests, asyncio, re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
-db = client[os.environ["DB_NAME"]]
+def _require_env(name: str) -> str:
+    v = os.environ.get(name)
+    if not v:
+        raise RuntimeError(f"Missing required environment variable {name!r}. Copy backend/.env.example to backend/.env and fill in the values, or run inside the Emergent preview which provisions them automatically.")
+    return v
+client = AsyncIOMotorClient(_require_env("MONGO_URL"))
+db = client[_require_env("DB_NAME")]
 app = FastAPI(title="CareFlow API")
 api = APIRouter(prefix="/api")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 UPLOAD_DIR = ROOT_DIR / "private_uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
-SECRET = os.environ["AUTH_SECRET"]
+SECRET = _require_env("AUTH_SECRET")
 reminder_task = None
 
 app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
