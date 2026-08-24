@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 5 regression on CareFlow report upload/release + patient-document review + admin workspace mobile layout. Backend: 18/18 pytest assertions passed (/api/health, 3-role login + /auth/me, 6 protected routes reject unauthenticated, report upload private-by-default, private report NOT leaked to patient list or file stream, release via PATCH visibility, authenticated patient file streaming with byte-exact content, cross-patient isolation, invalid file type 400, invalid visibility 400, unknown report 404, RBAC 403 for patient upload/release, patient-document upload -> pending_review -> admin accept/reject with notifications for both patient and admin). Frontend: admin login -> /app/records renders AdminReports; UI upload shows 'Report uploaded privately' message and the row appears with visibility 'private' + Release button; Release switches row to 'patient_visible / Released'; accept and reject of patient documents both update the queue; patient sees only the released report in /app/records (private clinic reports not leaked), 'View report' link streams the PDF (200, content-type application/pdf) using the cookie session; notifications page shows 'Medical report released' and 'Document review updated'. CSS mobile fix VERIFIED: .admin-report-grid computed grid-template-columns = single track at 375px (345px) and 390px (358.8px), review queue stacked below the upload panel, no horizontal overflow (scrollWidth == innerWidth), and two tracks at 1200px (420px 404.5px).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/patient-documents/upload", "issue": "Admin notification target is hard-coded to user_id 'demo_admin'; any real/non-seeded admin account never receives the pending-review notification."},
+      {"endpoint": "GET /api/reports/{id}/file", "issue": "Ownership is only enforced for role 'patient'. Any doctor (or admin) can stream any patient's report file, including reports uploaded by other doctors, and GET /api/reports for doctors filters by uploaded_by but the file endpoint does not. Recommend restricting doctors to their own uploads / assigned patients."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Patient personal document submission", "issue": "POST /api/patient-documents/upload exists and works via API, but there is no patient-facing UI to submit a document and no patient-side view of their submitted documents' review status (accepted/rejected). Patients can only learn the outcome from a notification.", "affected_selectors": ["[data-testid=\"health-record-1\"]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iteration5_reports.py", "/app/test_reports/pytest/iteration_5_results.xml"],
+  "action_items": [
+    "Replace hard-coded 'demo_admin' notification recipient in patient-document upload with a lookup of all users with role 'admin'.",
+    "Add ownership/authorization check for doctors in GET /api/reports/{report_id}/file.",
+    "Consider adding a patient UI to upload personal documents and view their review status (endpoint already implemented)."
+  ],
+  "critical_code_review_comments": [
+    "server.py and App.js use extremely dense single-line statements; readability/maintainability is poor even though functionality is correct.",
+    "PATCH /api/reports/{id}/visibility resets released_at to None on any non-release status change, losing the original release timestamp for archived reports.",
+    "Report/document file streaming has no rate limiting or audit trail of who accessed a private file — relevant for a healthcare product claim of privacy-first."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration5_reports.py"],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "100% of tested flows (admin upload/release, doc accept+reject, patient view/stream, responsive grid at 375/390/1200)"},
+  "seed_data_creation": "Created transient reports/documents prefixed TEST_/UITEST via seeded accounts; all cleaned up from MongoDB after the run. Pre-existing 'TEST private report' rows from earlier iterations were left untouched.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "admin@careflow.demo / patient@careflow.demo / patient1@careflow.demo / doctor1@careflow.demo, password CareFlow123! (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Report workflow and admin mobile layout are green. New regression suite: /app/backend/tests/test_iteration5_reports.py (uses a process-unique RUN prefix so xdist workers do not delete each other's fixtures — do NOT revert to a shared '^TEST_' cleanup regex; that caused a false 404 failure on first run). AdminReports is at /app/records for role admin. Remaining unverified areas: Google OAuth, booking concurrency on fresh slots, doctor-role report file authorization gap.",
+  "rca_of_the_issue": "First pytest run showed one 404 on PATCH /api/patient-documents/{id}. Root cause was the test suite itself: a module-scoped autouse cleanup fixture deleted all documents matching '^TEST_' when the first xdist worker finished, removing the document another worker was still reviewing. Fixed by scoping cleanup to a process-unique title prefix; the endpoint was verified correct standalone (200 with status persisted and reviewed_by set). The CSS duplicate-rule bug is confirmed fixed: only the @media(max-width:850px) override follows the base .admin-report-grid rule, and computed styles resolve to one column at mobile widths."
+}

@@ -19,27 +19,35 @@ Build CareFlow, a production-oriented healthcare coordination platform connectin
 
 ## Implemented
 ### 2026-08-24
-- Built premium CareFlow landing page, responsive shell, role-aware dashboards, doctor directory, appointments, records, notifications, and legal pages.
-- Added seeded fictional clinic, five doctors, eight patients, demo patient/doctor/admin accounts, JWT auth, Google callback, logout, health check, and protected APIs.
-- Added availability-generated slots, atomic slot locks, cancellation handling, patient-visible report permissions, private upload/download streaming, audit-ready record model, and reminder scheduler.
-- Verified with lint, production build, external API checks, responsive screenshot, and iteration-2 end-to-end QA.
-- Added the patient booking journey from the doctor directory: 14-day date calendar, live availability requests, selectable times, confirmation messaging, and backend appointment creation.
-- Verified the booking journey through browser QA on desktop and mobile, including dialog close, live slot selection, confirmation, and no horizontal overflow.
+- Premium landing page, responsive shell, role-aware dashboards, doctor directory, appointments, records, notifications, and legal pages.
+- Seeded fictional clinic, five doctors, eight patients, demo patient/doctor/admin accounts, JWT auth, Google callback, logout, health check, and protected APIs.
+- Availability-generated slots, atomic slot locks, cancellation handling, patient-visible report permissions, private upload/download streaming, audit-ready record model, and reminder scheduler.
+- Patient booking journey from directory: 14-day date calendar, live availability, selectable times, confirmation, backend appointment creation.
+- Clinic admin report workspace: private-by-default upload, explicit release to patient, and pending patient-document review (accept/reject).
+
+### 2026-08-24 (final QA pass)
+- Fixed mobile responsive bug: duplicate `.admin-report-grid` rule after the `@media(max-width:850px)` override was removed from `App.css`. Verified computed `grid-template-columns` is a single track at 375/390px and two tracks at 1200px; review queue stacks below the upload panel; no horizontal overflow.
+- Restricted `GET /api/reports/{id}/file` for doctors to reports they uploaded (was previously unrestricted for the doctor role).
+- Replaced hard-coded `demo_admin` notification target in patient-document upload with a fan-out to every user with `role=admin`.
+- Added self-isolated concurrent-booking regression test (`test_concurrent_booking_fresh_slot_isolated`) that always picks a fresh future date/slot so `[409,409]` from stale fixtures cannot recur.
+- Testing-agent iteration 5: 18/18 backend assertions pass, admin/patient UI flows pass, responsive grid pass.
 
 ## Prioritized backlog
-### P0
-- Expand admin UI for report upload/release, patient document review, doctor management, and appointment status controls.
-- Add explicit rescheduling and doctor-unavailability exception screens around the existing protected APIs.
+### P0 — none open
 
 ### P1
-- Add full patient registration/profile/settings forms and doctor availability editor UI.
-- Add audit log viewer, report metadata/version management, and operational analytics.
-- Add email provider adapter controlled entirely by environment configuration.
+- Doctor unavailability workflow: mark blocks, identify affected appointments, notify patients, and offer alternate slots.
+- Doctor availability editor UI and appointment status management (reschedule/cancel/no-show) from doctor and admin dashboards.
+- Patient-facing UI to submit personal documents and see the accepted/rejected status (endpoint already implemented).
+- End-to-end verification of Google OAuth callback flow against configured provider.
+- Report versioning, archival, and richer report viewer (PDF zoom / pagination).
 
 ### P2
-- Add richer institution branches/departments, pagination, timezone preferences, accessibility audit, and translations.
+- Rate limiting, audit-log viewer, report access audit trail, CSRF/session posture review.
+- Institution branches/departments, pagination, timezone preferences, accessibility audit, and translations.
+- Optional platform-level super-admin surface.
 
 ## Next tasks
-1. Build the clinic admin report release and patient-document review screens.
-2. Add patient booking date/slot picker connected to `/api/slots` and `/api/appointments`.
-3. Add doctor unavailable date ranges with affected-appointment rescheduling workflow.
+1. Doctor unavailability + reschedule workflow.
+2. Patient personal document upload UI.
+3. Doctor availability editor + admin appointment status controls.

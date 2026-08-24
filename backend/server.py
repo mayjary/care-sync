@@ -36,6 +36,7 @@ class AppointmentCreate(BaseModel): doctor_id: str; appointment_date: str; appoi
 class AvailabilityCreate(BaseModel): doctor_id: Optional[str] = None; weekday: int = Field(ge=0, le=6); start_time: str; end_time: str; duration: int = 30
 class StatusUpdate(BaseModel): status: str
 class NoteCreate(BaseModel): note: str
+class ReviewUpdate(BaseModel): status: str
 
 async def current_user(request: Request):
     raw = request.cookies.get("session_token")
@@ -164,15 +165,44 @@ async def upload_report(patient_id: str=Form(...), title: str=Form(...), report_
     data=await file.read()
     if len(data)>10*1024*1024: raise HTTPException(413,"File must be smaller than 10 MB")
     fid="file_"+uuid.uuid4().hex; path=UPLOAD_DIR/fid; path.write_bytes(data)
-    item={"report_id":"rpt_"+uuid.uuid4().hex[:10],"patient_id":patient_id,"uploaded_by":user["user_id"],"uploaded_by_name":user["name"],"title":title,"report_type":report_type,"visibility":visibility,"file_id":fid,"file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"created_at":now().isoformat()}; await db.reports.insert_one(item); await notify(patient_id,"New medical report","A new medical document is available in your CareFlow account.","report"); return public(item)
+    item={"report_id":"rpt_"+uuid.uuid4().hex[:10],"patient_id":patient_id,"uploaded_by":user["user_id"],"uploaded_by_name":user["name"],"title":title,"report_type":report_type,"visibility":"private","file_id":fid,"file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"created_at":now().isoformat()}; await db.reports.insert_one(item); return public(item)
 @api.get("/reports")
 async def reports(user=Depends(current_user)):
     q={"patient_id":user["user_id"],"visibility":{"$in":["patient_visible","public"]}} if user["role"]=="patient" else ({"uploaded_by":user["user_id"]} if user["role"]=="doctor" else {})
     return [public(x) async for x in db.reports.find(q,{"_id":0}).sort("created_at",-1)]
+@api.patch("/reports/{report_id}/visibility")
+async def release_report(report_id: str, body: StatusUpdate, user=Depends(roles("admin"))):
+    if body.status not in ["private", "patient_visible", "archived"]: raise HTTPException(400, "Invalid report visibility")
+    report=await db.reports.find_one({"report_id":report_id},{"_id":0})
+    if not report: raise HTTPException(404,"Report not found")
+    await db.reports.update_one({"report_id":report_id},{"$set":{"visibility":body.status,"released_at":now().isoformat() if body.status=="patient_visible" else None}})
+    if body.status=="patient_visible": await notify(report["patient_id"],"Medical report released","A new medical document is available in your CareFlow account.","report")
+    return {**report,"visibility":body.status}
+@api.get("/patient-documents")
+async def patient_documents(user=Depends(current_user)):
+    q={} if user["role"]=="admin" else {"patient_id":user["user_id"]}
+    return [public(x) async for x in db.patient_documents.find(q,{"_id":0}).sort("created_at",-1)]
+@api.post("/patient-documents/upload")
+async def upload_patient_document(title: str=Form(...), file: UploadFile=File(...), user=Depends(roles("patient"))):
+    if file.content_type not in ["application/pdf","image/jpeg","image/png"]: raise HTTPException(400,"Only PDF, JPG, and PNG files are accepted")
+    data=await file.read()
+    if len(data)>10*1024*1024: raise HTTPException(413,"File must be smaller than 10 MB")
+    fid="file_"+uuid.uuid4().hex; (UPLOAD_DIR/fid).write_bytes(data)
+    item={"document_id":"doc_"+uuid.uuid4().hex[:10],"patient_id":user["user_id"],"patient_name":user["name"],"title":title,"file_id":fid,"file_name":file.filename,"file_size":len(data),"content_type":file.content_type,"status":"pending_review","created_at":now().isoformat()}; await db.patient_documents.insert_one(item)
+    async for a in db.users.find({"role":"admin"},{"user_id":1}): await notify(a["user_id"],"Patient document awaiting review",f"{user['name']} submitted a document for review.","review")
+    return public(item)
+@api.patch("/patient-documents/{document_id}")
+async def review_patient_document(document_id: str, body: ReviewUpdate, user=Depends(roles("admin"))):
+    if body.status not in ["accepted","rejected","needs_clarification"]: raise HTTPException(400,"Invalid review status")
+    item=await db.patient_documents.find_one({"document_id":document_id},{"_id":0})
+    if not item: raise HTTPException(404,"Patient document not found")
+    await db.patient_documents.update_one({"document_id":document_id},{"$set":{"status":body.status,"reviewed_by":user["user_id"],"reviewed_at":now().isoformat()}}); await notify(item["patient_id"],"Document review updated",f"Your uploaded document is now {body.status.replace('_',' ')}.","review"); return {**item,"status":body.status}
 @api.get("/reports/{report_id}/file")
 async def report_file(report_id: str, user=Depends(current_user)):
     r=await db.reports.find_one({"report_id":report_id},{"_id":0})
-    if not r or (user["role"]=="patient" and (r["patient_id"]!=user["user_id"] or r["visibility"] not in ["patient_visible","public"])): raise HTTPException(404,"This report is no longer available")
+    if not r: raise HTTPException(404,"This report is no longer available")
+    if user["role"]=="patient" and (r["patient_id"]!=user["user_id"] or r["visibility"] not in ["patient_visible","public"]): raise HTTPException(404,"This report is no longer available")
+    if user["role"]=="doctor" and r.get("uploaded_by")!=user["user_id"]: raise HTTPException(403,"You are not authorized to access this report")
     path=UPLOAD_DIR/r["file_id"]
     if not path.exists(): raise HTTPException(404,"This report is no longer available")
     return FileResponse(path, media_type=r["content_type"], filename=r["file_name"])
@@ -190,7 +220,10 @@ async def reminder_loop():
         await asyncio.sleep(60)
 
 async def seed():
-    if await db.users.count_documents({}) > 0: return
+    if await db.users.count_documents({}) > 0:
+        if await db.patient_documents.count_documents({}) == 0:
+            await db.patient_documents.insert_one({"document_id":"demo_doc_1","patient_id":"demo_patient","patient_name":"Aarav Sharma","title":"Previous blood test","file_id":"demo-file","file_name":"previous-blood-test.pdf","file_size":0,"content_type":"application/pdf","status":"pending_review","created_at":now().isoformat()})
+        return
     clinic={"name":"CareFlow Medical Centre","type":"Multi-specialty clinic"}; await db.institutions.insert_one(clinic)
     docs=[("Dr. Sarah Mehta","General Medicine"),("Dr. Rahul Shah","Cardiology"),("Dr. Anika Rao","Dermatology"),("Dr. Vikram Iyer","Orthopedics"),("Dr. Mira Kapoor","Pediatrics")]
     for i,(name,spec) in enumerate(docs):

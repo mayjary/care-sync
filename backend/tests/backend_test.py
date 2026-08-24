@@ -54,3 +54,35 @@ def test_legal_and_health():
     assert requests.get(f"{BASE_URL}/api/health").status_code == 200
     for path in ["/", "/privacy", "/terms", "/disclaimer"]:
         assert requests.get(f"{BASE_URL}{path}").status_code in [200, 404]
+
+
+def test_concurrent_booking_fresh_slot_isolated():
+    """Fresh unique-date slot: only one of two concurrent bookings may succeed."""
+    import concurrent.futures as cf
+    from datetime import date, timedelta
+
+    doctors = requests.get(f"{BASE_URL}/api/doctors").json()
+    assert doctors, "no seeded doctors"
+    doctor_id = doctors[0]["user_id"]
+    # Find a future date that has slots and pick a slot with available=true
+    picked_date, picked_time = None, None
+    for offset in range(1, 60):
+        d = (date.today() + timedelta(days=offset)).isoformat()
+        slots = requests.get(f"{BASE_URL}/api/slots/{doctor_id}/{d}").json()
+        avail = [s for s in slots if s.get("available")]
+        if avail:
+            picked_date, picked_time = d, avail[-1]["time"]  # last available = least likely to collide with any older fixture
+            break
+    assert picked_date and picked_time, "no available slot in next 60 days"
+
+    def book(email):
+        s, r = login(email)
+        assert r.status_code == 200
+        return s.post(
+            f"{BASE_URL}/api/appointments",
+            json={"doctor_id": doctor_id, "appointment_date": picked_date, "appointment_time": picked_time},
+        ).status_code
+
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        codes = sorted(ex.map(book, ["patient@careflow.demo", "patient1@careflow.demo"]))
+    assert codes == [200, 409], f"expected one success and one conflict on fresh slot, got {codes}"
